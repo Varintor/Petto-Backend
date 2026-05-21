@@ -8,3 +8,6 @@ COPY requirements.txt .
 RUN pip install --default-timeout=1000 --no-cache-dir -r requirements.txt
 
 COPY . .
+
+# --- คำสั่งรัน FastAPI (สำคัญมาก!) ---
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "$PORT"]

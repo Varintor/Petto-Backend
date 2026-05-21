@@ -27,6 +27,15 @@ app.include_router(assessments.router)
 def read_root():
     return {"message": "Welcome to Petto Backend!"}
 
+@app.get("/health", tags=["System"])
+def health_check():
+    """Health check endpoint สำหรับ Railway"""
+    return {
+        "status": "healthy",
+        "service": "petto-backend",
+        "version": "1.0.0"
+    }
+
 @app.get("/api/v1/setup-mock-data", tags=["System"])
 def setup_mock_data(db: Session = Depends(get_db)):
     user = db.query(models.User).first()
