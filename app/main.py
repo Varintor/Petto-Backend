@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Depends
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from app.database import SessionLocal, get_db
 from app import models
@@ -6,8 +7,17 @@ from app import models
 # Import ตัว Routers ต่างๆ ที่เราแยกไว้
 from app.routers import vaccinations, assessments
 
-# 1. ประกาศสร้างแอป FastAPI 
+# 1. ประกาศสร้างแอป FastAPI
 app = FastAPI(title="Petto API", version="1.0.0")
+
+# 2. เปิด CORS สำหรับ Flutter Web
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # อนุญาตทุก origin (ใน production ควรระบุ URL เฉพาะ)
+    allow_credentials=True,
+    allow_methods=["*"],  # อนุญาตทุก HTTP method
+    allow_headers=["*"],  # อนุญาตทุก header
+)
 
 # 2. นำ Routers มาเสียบเข้ากับตัวแอปหลัก (ต้องทำหลังประกาศ app นะครับ!)
 app.include_router(vaccinations.router)
