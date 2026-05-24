@@ -1,13 +1,21 @@
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Enum, Date, Text, Float, Boolean
+from sqlalchemy import (
+    Column, BigInteger, String, DateTime, Date, ForeignKey, Enum, Text,
+    Float, Boolean, Numeric, UniqueConstraint, CheckConstraint, func, text,
+)
 from sqlalchemy.orm import declarative_base, relationship
-from datetime import datetime
 import enum
 
 Base = declarative_base()
 
 # ==========================================
-# Enums (ตัวแปรแบบเลือกค่าได้)
+# Enums  (must match the Supabase native enum types in srs_schema_v1)
 # ==========================================
+# NOTE on storage:
+#  - SQLAlchemy persists the enum MEMBER NAME by default. RiskLevel/
+#    ConsultationStatus member names are UPPERCASE and match their DB labels.
+#  - MessageSender/ActivitySource DB labels are lowercase, so we use
+#    values_callable to persist the enum VALUE instead of the name.
+
 class RiskLevel(enum.Enum):
     LOW = "Low Risk"
     MODERATE = "Moderate Risk"
@@ -17,115 +25,205 @@ class ConsultationStatus(enum.Enum):
     PENDING = "Pending"
     ACTIVE = "Active"
     COMPLETED = "Completed"
+    CANCELLED = "Cancelled"
+
+class MessageSender(enum.Enum):
+    USER = "user"
+    VET = "vet"
+
+class ActivitySource(enum.Enum):
+    PHONE = "phone"
+    DEVICE = "device"
+
+
+# Reusable enum column types bound to the existing Supabase types by name.
+RiskLevelType = Enum(RiskLevel, name="risk_level")
+ConsultationStatusType = Enum(ConsultationStatus, name="consultation_status")
+MessageSenderType = Enum(
+    MessageSender, name="message_sender",
+    values_callable=lambda e: [m.value for m in e],
+)
+ActivitySourceType = Enum(
+    ActivitySource, name="activity_source",
+    values_callable=lambda e: [m.value for m in e],
+)
+
 
 # ==========================================
-# Core Entities (กลุ่มข้อมูลหลัก)
+# Feature 1: Auth & Profile
 # ==========================================
 class User(Base):
-    """ตารางเจ้าของสัตว์เลี้ยง (Feature 1: Authentication)"""
+    """เจ้าของสัตว์เลี้ยง (Feature 1: Authentication & Profile)"""
     __tablename__ = "users"
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(BigInteger, primary_key=True)
     email = Column(String, unique=True, index=True, nullable=False)
-    password_hash = Column(String, nullable=False) # เตรียมไว้สำหรับระบบ Login
-    name = Column(String)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    password_hash = Column(String, nullable=False)
+    name = Column(String, nullable=True)
+    avatar_uri = Column(String, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
 
-    # ความสัมพันธ์: 1 User มีสัตว์เลี้ยงได้หลายตัว
     pets = relationship("Pet", back_populates="owner", cascade="all, delete-orphan")
 
+
 class Pet(Base):
-    """ตารางสัตว์เลี้ยง"""
-    __tablename__ = "pets"
+    """โปรไฟล์สัตว์เลี้ยง (table: pet_profiles)"""
+    __tablename__ = "pet_profiles"
 
-    id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    name = Column(String, index=True, nullable=False)
-    species = Column(String) 
+    id = Column(BigInteger, primary_key=True)
+    user_id = Column(BigInteger, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    name = Column(String, nullable=False)
+    species = Column(String, nullable=True)
     breed = Column(String, nullable=True)
-    date_of_birth = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    gender = Column(String, nullable=True)
+    date_of_birth = Column(Date, nullable=True)
+    weight_kg = Column(Numeric(5, 2), nullable=True)
+    avatar_uri = Column(String, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
 
-    # ความสัมพันธ์
     owner = relationship("User", back_populates="pets")
     assessments = relationship("HealthAssessment", back_populates="pet", cascade="all, delete-orphan")
     activities = relationship("ActivityLog", back_populates="pet", cascade="all, delete-orphan")
     consultations = relationship("Consultation", back_populates="pet", cascade="all, delete-orphan")
     vaccinations = relationship("Vaccination", back_populates="pet", cascade="all, delete-orphan")
+    missions = relationship("DailyMission", back_populates="pet", cascade="all, delete-orphan")
+
 
 # ==========================================
-# Phase 1 Features (กำลังพัฒนา)
+# Feature 2: AI Health Assessment
 # ==========================================
 class HealthAssessment(Base):
-    """ตารางประเมินสุขภาพด้วย AI (Feature 2)"""
     __tablename__ = "health_assessments"
 
-    id = Column(Integer, primary_key=True, index=True)
-    pet_id = Column(Integer, ForeignKey("pets.id"), nullable=False)
-    symptom_description = Column(Text, nullable=False) 
-    image_uri = Column(String, nullable=True) # เก็บ URL จาก Supabase
-    risk_level = Column(Enum(RiskLevel), nullable=True) 
-    ai_raw_response = Column(Text, nullable=True) 
-    created_at = Column(DateTime, default=datetime.utcnow)
+    id = Column(BigInteger, primary_key=True)
+    pet_id = Column(BigInteger, ForeignKey("pet_profiles.id", ondelete="CASCADE"), nullable=False, index=True)
+    symptom_description = Column(Text, nullable=False)
+    image_uri = Column(String, nullable=True)
+    risk_level = Column(RiskLevelType, nullable=True)
+    ai_raw_response = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     pet = relationship("Pet", back_populates="assessments")
 
-class ActivityLog(Base):
-    """ตารางบันทึกกิจกรรม (Feature 4 - ห้ามเก็บพิกัด GPS ดิบ)"""
-    __tablename__ = "activity_logs"
-
-    id = Column(Integer, primary_key=True, index=True)
-    pet_id = Column(Integer, ForeignKey("pets.id"), nullable=False)
-    activity_type = Column(String, nullable=False) # เช่น Walking, Running
-    duration_minutes = Column(Float, nullable=False, default=0.0) 
-    distance_meters = Column(Float, nullable=False, default=0.0) 
-    is_mission_completed = Column(Boolean, default=False) 
-    created_at = Column(DateTime, default=datetime.utcnow)
-
-    pet = relationship("Pet", back_populates="activities")
 
 # ==========================================
-# Phase 2 Features (เตรียมโครงสร้างรอไว้)
+# Feature 3: Vet Consultation (+ chat messages)
 # ==========================================
 class Veterinarian(Base):
-    """ตารางสัตวแพทย์"""
     __tablename__ = "veterinarians"
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(BigInteger, primary_key=True)
     email = Column(String, unique=True, index=True, nullable=False)
     password_hash = Column(String, nullable=False)
     name = Column(String, nullable=False)
     clinic_name = Column(String, nullable=True)
     license_number = Column(String, unique=True, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    specialty = Column(String, nullable=True)
+    avatar_uri = Column(String, nullable=True)
+    is_online = Column(Boolean, nullable=False, server_default=text("false"))
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     consultations = relationship("Consultation", back_populates="vet")
 
+
 class Consultation(Base):
-    """ตารางการให้คำปรึกษา (Feature 3)"""
     __tablename__ = "consultations"
 
-    id = Column(Integer, primary_key=True, index=True)
-    pet_id = Column(Integer, ForeignKey("pets.id"), nullable=False)
-    vet_id = Column(Integer, ForeignKey("veterinarians.id"), nullable=False)
-    status = Column(Enum(ConsultationStatus), default=ConsultationStatus.PENDING)
-    notes = Column(Text, nullable=True) # บันทึกย่อจากสัตวแพทย์
-    created_at = Column(DateTime, default=datetime.utcnow)
+    id = Column(BigInteger, primary_key=True)
+    pet_id = Column(BigInteger, ForeignKey("pet_profiles.id", ondelete="CASCADE"), nullable=False, index=True)
+    vet_id = Column(BigInteger, ForeignKey("veterinarians.id", ondelete="CASCADE"), nullable=False, index=True)
+    status = Column(ConsultationStatusType, nullable=False, server_default=text("'PENDING'"))
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
 
     pet = relationship("Pet", back_populates="consultations")
     vet = relationship("Veterinarian", back_populates="consultations")
+    messages = relationship("Message", back_populates="consultation", cascade="all, delete-orphan")
 
+
+class Message(Base):
+    __tablename__ = "messages"
+
+    id = Column(BigInteger, primary_key=True)
+    consultation_id = Column(BigInteger, ForeignKey("consultations.id", ondelete="CASCADE"), nullable=False, index=True)
+    sender_type = Column(MessageSenderType, nullable=False)
+    sender_id = Column(BigInteger, nullable=True)
+    content = Column(Text, nullable=True)
+    attachment_uri = Column(String, nullable=True)
+    is_read = Column(Boolean, nullable=False, server_default=text("false"))
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    consultation = relationship("Consultation", back_populates="messages")
+
+    __table_args__ = (
+        CheckConstraint("content IS NOT NULL OR attachment_uri IS NOT NULL", name="messages_has_payload"),
+    )
+
+
+# ==========================================
+# Feature 4: Daily Missions & GPS Activity
+# ==========================================
+class DailyMission(Base):
+    __tablename__ = "daily_missions"
+
+    id = Column(BigInteger, primary_key=True)
+    pet_id = Column(BigInteger, ForeignKey("pet_profiles.id", ondelete="CASCADE"), nullable=False, index=True)
+    mission_date = Column(Date, nullable=False, server_default=func.current_date())
+    title = Column(String, nullable=False)
+    mission_type = Column(String, nullable=False, server_default=text("'walk'"))
+    target_value = Column(Numeric, nullable=True)
+    unit = Column(String, nullable=True)
+    reward = Column(String, nullable=True)
+    is_completed = Column(Boolean, nullable=False, server_default=text("false"))
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    pet = relationship("Pet", back_populates="missions")
+    activities = relationship("ActivityLog", back_populates="mission")
+
+    __table_args__ = (
+        UniqueConstraint("pet_id", "mission_date", "mission_type", name="uq_mission_per_day"),
+    )
+
+
+class ActivityLog(Base):
+    """บันทึกกิจกรรม/การเดิน (Feature 4 Mode A = phone, Mode B = device)"""
+    __tablename__ = "activity_logs"
+
+    id = Column(BigInteger, primary_key=True)
+    pet_id = Column(BigInteger, ForeignKey("pet_profiles.id", ondelete="CASCADE"), nullable=False, index=True)
+    mission_id = Column(BigInteger, ForeignKey("daily_missions.id", ondelete="SET NULL"), nullable=True)
+    source = Column(ActivitySourceType, nullable=False, server_default=text("'phone'"))
+    activity_type = Column(String, nullable=False)
+    duration_minutes = Column(Float, nullable=False, server_default=text("0"))
+    distance_meters = Column(Float, nullable=False, server_default=text("0"))
+    avg_speed_kmh = Column(Float, nullable=True)
+    route_polyline = Column(Text, nullable=True)
+    is_mission_completed = Column(Boolean, nullable=False, server_default=text("false"))
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    ended_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    pet = relationship("Pet", back_populates="activities")
+    mission = relationship("DailyMission", back_populates="activities")
+
+
+# ==========================================
+# Vaccinations (สมุดวัคซีน)
+# ==========================================
 class Vaccination(Base):
     __tablename__ = "vaccinations"
 
-    id = Column(Integer, primary_key=True, index=True)
-    pet_id = Column(Integer, ForeignKey("pets.id"), nullable=False) # เชื่อมกับตาราง pets
-    vaccine_name = Column(String, index=True, nullable=False) # ชื่อวัคซีน เช่น พิษสุนัขบ้า, หัดแมว
-    date_administered = Column(Date, nullable=False) # วันที่ฉีด
-    next_due_date = Column(Date, nullable=True) # วันนัดเข็มต่อไป (ใส่ค่าว่างได้ เผื่อไม่มีนัดต่อ)
-    clinic_name = Column(String, nullable=True) # ชื่อคลินิกที่ไปฉีด
-    notes = Column(Text, nullable=True) # หมายเหตุ/อาการหลังฉีด
-    created_at = Column(DateTime, default=datetime.utcnow)
+    id = Column(BigInteger, primary_key=True)
+    pet_id = Column(BigInteger, ForeignKey("pet_profiles.id", ondelete="CASCADE"), nullable=False, index=True)
+    vaccine_name = Column(String, index=True, nullable=False)
+    date_administered = Column(Date, nullable=False)
+    next_due_date = Column(Date, nullable=True)
+    clinic_name = Column(String, nullable=True)
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
 
-    # เชื่อมความสัมพันธ์กลับไปหาตาราง Pet
     pet = relationship("Pet", back_populates="vaccinations")
