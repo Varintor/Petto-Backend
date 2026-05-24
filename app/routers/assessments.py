@@ -1,5 +1,6 @@
 import os
 import uuid
+from typing import List
 from fastapi import APIRouter, Depends, File, UploadFile, Form, HTTPException
 from sqlalchemy.orm import Session
 from supabase import create_client, Client
@@ -21,6 +22,50 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and
 # --- ตั้งค่า Gemini AI (ใช้ package ใหม่) ---
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+
+# ==========================================
+# GET Endpoints - ดูข้อมูลการประเมิน
+# ==========================================
+
+@router.get("/assessments", response_model=List[schemas.AssessmentResponse])
+def get_all_assessments(db: Session = Depends(get_db)):
+    """
+    ดูการประเมินทั้งหมดในระบบ
+    """
+    assessments = db.query(models.HealthAssessment).order_by(models.HealthAssessment.created_at.desc()).all()
+    return assessments
+
+
+@router.get("/assessments/{assessment_id}", response_model=schemas.AssessmentResponse)
+def get_assessment(assessment_id: int, db: Session = Depends(get_db)):
+    """
+    ดูรายละเอียดการประเมินรายการเดียว
+    """
+    assessment = db.query(models.HealthAssessment).filter(models.HealthAssessment.id == assessment_id).first()
+    if not assessment:
+        raise HTTPException(status_code=404, detail="ไม่พบการประเมินในระบบ")
+    return assessment
+
+
+@router.get("/pets/{pet_id}/assessments", response_model=List[schemas.AssessmentResponse])
+def get_pet_assessments(pet_id: int, db: Session = Depends(get_db)):
+    """
+    ดูประวัติการประเมินทั้งหมดของสัตว์เลี้ยงตัวหนึ่ง
+    """
+    pet = db.query(models.Pet).filter(models.Pet.id == pet_id).first()
+    if not pet:
+        raise HTTPException(status_code=404, detail="ไม่พบสัตว์เลี้ยงในระบบ")
+
+    assessments = db.query(models.HealthAssessment).filter(
+        models.HealthAssessment.pet_id == pet_id
+    ).order_by(models.HealthAssessment.created_at.desc()).all()
+
+    return assessments
+
+
+# ==========================================
+# POST Endpoint - สร้างการประเมินใหม่
+# ==========================================
 
 @router.post("/assessments", response_model=schemas.AssessmentResponse)
 async def create_assessment(

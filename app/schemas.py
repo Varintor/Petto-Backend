@@ -3,7 +3,10 @@ from datetime import datetime, date
 from typing import Optional, List
 from app.models import RiskLevel
 
-# Schema สำหรับข้อมูลที่จะตอบกลับไปให้ Frontend
+# ==========================================
+# Feature 2: Health Assessment
+# ==========================================
+
 class AssessmentResponse(BaseModel):
     id: int
     pet_id: int
@@ -16,9 +19,49 @@ class AssessmentResponse(BaseModel):
     class Config:
         from_attributes = True
 
-# --- Schemas สำหรับ Vaccination ---
+# ==========================================
+# Feature 1: Pet Profile
+# ==========================================
 
-# 1. โครงสร้างข้อมูลที่ผู้ใช้ต้องส่งมาตอนบันทึกวัคซีนเข็มใหม่
+class PetCreate(BaseModel):
+    user_id: int
+    name: str
+    species: Optional[str] = None
+    breed: Optional[str] = None
+    gender: Optional[str] = None
+    date_of_birth: Optional[date] = None
+    weight_kg: Optional[float] = None
+    avatar_uri: Optional[str] = None
+
+class PetUpdate(BaseModel):
+    name: Optional[str] = None
+    species: Optional[str] = None
+    breed: Optional[str] = None
+    gender: Optional[str] = None
+    date_of_birth: Optional[date] = None
+    weight_kg: Optional[float] = None
+    avatar_uri: Optional[str] = None
+
+class PetResponse(BaseModel):
+    id: int
+    user_id: int
+    name: str
+    species: Optional[str] = None
+    breed: Optional[str] = None
+    gender: Optional[str] = None
+    date_of_birth: Optional[date] = None
+    weight_kg: Optional[float] = None
+    avatar_uri: Optional[str] = None
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+# ==========================================
+# Vaccinations
+# ==========================================
+
 class VaccinationCreate(BaseModel):
     pet_id: int
     vaccine_name: str
@@ -27,7 +70,6 @@ class VaccinationCreate(BaseModel):
     clinic_name: Optional[str] = None
     notes: Optional[str] = None
 
-# 2. โครงสร้างข้อมูลที่ระบบจะส่งกลับไปให้แอป (เพิ่ม id และเวลาที่สร้าง)
 class VaccinationResponse(BaseModel):
     id: int
     pet_id: int
@@ -39,4 +81,4 @@ class VaccinationResponse(BaseModel):
     created_at: datetime
 
     class Config:
-        from_attributes = True  # (ถ้าเกิด Error ตอนรัน ลองเปลี่ยนเป็น orm_mode = True นะครับ)
+        from_attributes = True

@@ -18,7 +18,7 @@ def create_vaccination(vaccination: schemas.VaccinationCreate, db: Session = Dep
     if not pet:
         raise HTTPException(status_code=404, detail="ไม่พบสัตว์เลี้ยงในระบบ")
     
-    db_vaccination = models.Vaccination(**vaccination.dict())
+    db_vaccination = models.Vaccination(**vaccination.model_dump())
     db.add(db_vaccination)
     db.commit()
     db.refresh(db_vaccination)
