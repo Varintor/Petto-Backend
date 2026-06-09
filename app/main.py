@@ -1,3 +1,4 @@
+import os
 from fastapi import FastAPI, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -13,13 +14,21 @@ from app.routers import (
 # 1. ประกาศสร้างแอป FastAPI
 app = FastAPI(title="Petto API", version="1.0.0")
 
-# 2. เปิด CORS สำหรับ Flutter Web
+# 2. เปิด CORS สำหรับ Flutter Web / Mobile
+#
+# Production-safe rule: a wildcard origin ("*") and allow_credentials=True
+# cannot be combined — browsers reject it and Starlette refuses to echo "*"
+# with credentials. We have no cookie/credential auth yet, so credentials are
+# off and "*" works for both Flutter mobile (CORS doesn't apply) and web.
+# When real auth (cookies) lands, set ALLOWED_ORIGINS to explicit domains and
+# flip allow_credentials back on.
+_allowed_origins = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "*").split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # อนุญาตทุก origin (ใน production ควรระบุ URL เฉพาะ)
-    allow_credentials=True,
-    allow_methods=["*"],  # อนุญาตทุก HTTP method
-    allow_headers=["*"],  # อนุญาตทุก header
+    allow_origins=_allowed_origins,
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 

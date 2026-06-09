@@ -1,0 +1,23 @@
+# Python virtual envs & caches
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Secrets & local config (Railway injects env vars at runtime)
+.env
+.env.*
+
+# VCS & tooling
+.git/
+.gitignore
+.dockerignore
+.claude/
+
+# Dev-only scripts & docs (not needed in the image)
+test_*.py
+test_*.sh
+find_working_model.py
+list_models.py
+*.md

@@ -1,8 +1,14 @@
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from dotenv import load_dotenv
 import os
 
-# ดึงค่า URL เชื่อมต่อฐานข้อมูลจาก docker-compose.yml
+# Load variables from .env so the app works when run directly (uvicorn, no
+# Docker). Inside Docker the env is already injected by docker-compose, and
+# load_dotenv() is a harmless no-op there (it never overrides existing vars).
+load_dotenv()
+
+# ดึงค่า URL เชื่อมต่อฐานข้อมูล (Supabase pooler ผ่าน .env / Railway env)
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 if not DATABASE_URL:

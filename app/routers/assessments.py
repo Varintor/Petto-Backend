@@ -1,4 +1,5 @@
 import os
+import time
 import uuid
 from typing import List
 from fastapi import APIRouter, Depends, File, UploadFile, Form, HTTPException
@@ -122,18 +123,37 @@ async def create_assessment(
             """
 
             # ใช้ model และวิธีส่งรูปที่ถูกต้อง
-            response = gemini_client.models.generate_content(
-                model='models/gemini-flash-latest',
-                contents=[
-                    prompt,
-                    {
-                        "inline_data": {
-                            "mime_type": image.content_type,
-                            "data": file_bytes
-                        }
+            # gemini-flash-latest มักตอบ 503 (overloaded) เป็นครั้งคราว ->
+            # retry แบบ backoff สั้นๆ ก่อนจะ fallback เป็น MODERATE
+            contents = [
+                prompt,
+                {
+                    "inline_data": {
+                        "mime_type": image.content_type,
+                        "data": file_bytes
                     }
-                ]
-            )
+                }
+            ]
+            response = None
+            last_err = None
+            for attempt in range(4):
+                try:
+                    response = gemini_client.models.generate_content(
+                        model='models/gemini-flash-latest',
+                        contents=contents
+                    )
+                    break
+                except Exception as retry_err:
+                    last_err = retry_err
+                    msg = str(retry_err)
+                    # retry เฉพาะกรณี overload/ชั่วคราว
+                    if any(s in msg for s in ("503", "UNAVAILABLE", "overload", "high demand", "429")):
+                        time.sleep(1.5 * (attempt + 1))
+                        continue
+                    raise
+            if response is None:
+                raise last_err
+
             ai_response_text = response.text
 
             if "HIGH" in ai_response_text.upper():
