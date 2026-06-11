@@ -7,6 +7,7 @@ from pydantic import BaseModel
 
 from app import models
 from app.database import get_db
+from app.utils.time import now_bkk, today_bkk
 
 router = APIRouter(
     prefix="/api/v1",
@@ -79,7 +80,7 @@ def get_dashboard_stats(pet_id: int, db: Session = Depends(get_db)):
     # ==========================================
     # 2. Activity Summary (เดือนนี้)
     # ==========================================
-    month_start = datetime.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    month_start = now_bkk().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
     activities = db.query(
         func.count(models.ActivityLog.id).label('count'),
@@ -124,7 +125,7 @@ def get_dashboard_stats(pet_id: int, db: Session = Depends(get_db)):
     missions_this_week = db.query(func.count(models.ActivityLog.id)).filter(
         models.ActivityLog.pet_id == pet_id,
         models.ActivityLog.is_mission_completed == True,
-        models.ActivityLog.created_at >= datetime.now() - timedelta(days=7)
+        models.ActivityLog.created_at >= now_bkk() - timedelta(days=7)
     ).scalar() or 0
 
     # คำนวณ Streak (ทำติดต่อกันกี่วัน)
@@ -183,7 +184,7 @@ def get_health_trends(pet_id: int, days: int = 30, db: Session = Depends(get_db)
     if not pet:
         raise HTTPException(status_code=404, detail="ไม่พบสัตว์เลี้ยงในระบบ")
 
-    start_date = datetime.now() - timedelta(days=days)
+    start_date = now_bkk() - timedelta(days=days)
 
     # Activity trend (รายวัน)
     activities = db.query(
@@ -248,7 +249,7 @@ def _calculate_health_score(pet_id: int, db: Session) -> int:
 def _calculate_activity_score(pet_id: int, db: Session) -> int:
     """คำนวณคะแนนจากกิจกรรม (0-100)"""
     # ดูกิจกรรม 7 วันล่าสุด
-    week_ago = datetime.now() - timedelta(days=7)
+    week_ago = now_bkk() - timedelta(days=7)
 
     activities = db.query(
         func.sum(models.ActivityLog.duration_minutes).label('total_duration'),
@@ -296,7 +297,7 @@ def _calculate_assessment_score(pet_id: int, db: Session) -> int:
     base_score = risk_scores.get(last_assessment.risk_level, 50)
 
     # โบนัสถ้าประเมินเมื่อเร็วๆ นี้ (ภายใน 7 วัน)
-    days_since = (datetime.now() - last_assessment.created_at).days
+    days_since = (now_bkk() - last_assessment.created_at).days
     if days_since <= 7:
         base_score += 10
     elif days_since <= 30:
@@ -320,7 +321,7 @@ def _calculate_vaccination_score(pet_id: int, db: Session) -> int:
     if not last_vac.next_due_date:
         return 100  # ไม่มีวันนัดต่อ = เสร็จสิ้นแล้ว
 
-    days_until_due = (last_vac.next_due_date - datetime.now().date()).days
+    days_until_due = (last_vac.next_due_date - today_bkk()).days
 
     if days_until_due < 0:
         return 20  # เกินวันนัดแล้ว
@@ -342,7 +343,7 @@ def _get_vaccination_status(vaccinations: list) -> tuple[str, datetime | None]:
     if not last_vac.next_due_date:
         return "up_to_date", None
 
-    days_until = (last_vac.next_due_date - datetime.now().date()).days
+    days_until = (last_vac.next_due_date - today_bkk()).days
 
     if days_until < 0:
         return "overdue", last_vac.next_due_date
@@ -355,11 +356,12 @@ def _get_vaccination_status(vaccinations: list) -> tuple[str, datetime | None]:
 def _calculate_mission_streak(pet_id: int, db: Session) -> int:
     """คำนวณ Streak (ทำติดต่อกันกี่วัน)"""
     streak = 0
-    current_date = datetime.now().date()
+    current_date = today_bkk()
 
     while True:
-        day_start = datetime.combine(current_date, datetime.min.time())
-        day_end = datetime.combine(current_date, datetime.max.time())
+        # day_start/day_end must be tz-aware to compare with created_at (UTC in DB)
+        day_start = datetime.combine(current_date, datetime.min.time(), tzinfo=now_bkk().tzinfo)
+        day_end = datetime.combine(current_date, datetime.max.time(), tzinfo=now_bkk().tzinfo)
 
         activity = db.query(models.ActivityLog).filter(
             models.ActivityLog.pet_id == pet_id,

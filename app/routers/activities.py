@@ -7,6 +7,7 @@ from pydantic import BaseModel
 
 from app import models
 from app.database import get_db
+from app.utils.time import now_bkk
 
 router = APIRouter(
     prefix="/api/v1",
@@ -110,7 +111,7 @@ def get_today_activity(pet_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="ไม่พบสัตว์เลี้ยงในระบบ")
 
     # หากิจกรรมล่าสุดของวันนี้
-    today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    today_start = now_bkk().replace(hour=0, minute=0, second=0, microsecond=0)
 
     activity = db.query(models.ActivityLog).filter(
         models.ActivityLog.pet_id == pet_id,
@@ -128,7 +129,7 @@ def get_today_activity(pet_id: int, db: Session = Depends(get_db)):
             duration_minutes=0.0,
             distance_meters=0.0,
             is_mission_completed=False,
-            created_at=datetime.now()
+            created_at=now_bkk()
         )
 
     return activity
