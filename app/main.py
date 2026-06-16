@@ -6,16 +6,12 @@ from sqlalchemy.orm import Session
 from app.database import SessionLocal, get_db
 from app import models
 
-# Import ตัว Routers ต่างๆ ที่เราแยกไว้
 from app.routers import (
-    vaccinations, assessments, pets, activities, stats, missions, consultations,
+    auth, vaccinations, assessments, pets, activities, stats, missions, consultations,
 )
 
-# 1. ประกาศสร้างแอป FastAPI
 app = FastAPI(title="Petto API", version="1.0.0")
 
-# 2. เปิด CORS สำหรับ Flutter Web / Mobile
-#
 # Production-safe rule: a wildcard origin ("*") and allow_credentials=True
 # cannot be combined — browsers reject it and Starlette refuses to echo "*"
 # with credentials. We have no cookie/credential auth yet, so credentials are
@@ -32,10 +28,6 @@ app.add_middleware(
 )
 
 
-# Ensure unhandled 500 errors still carry CORS headers. Without this, a server
-# crash returns a response with no Access-Control-Allow-Origin, so browsers
-# (Flutter Web) block it and the client only sees an opaque "connection error"
-# instead of the real error. We attach the headers manually here.
 @app.exception_handler(Exception)
 async def cors_safe_exception_handler(request: Request, exc: Exception):
     origin = request.headers.get("origin", "*")
@@ -49,7 +41,7 @@ async def cors_safe_exception_handler(request: Request, exc: Exception):
         },
     )
 
-# 2. นำ Routers มาเสียบเข้ากับตัวแอปหลัก (ต้องทำหลังประกาศ app นะครับ!)
+app.include_router(auth.router)
 app.include_router(vaccinations.router)
 app.include_router(assessments.router)
 app.include_router(pets.router)
@@ -64,7 +56,6 @@ def read_root():
 
 @app.get("/health", tags=["System"])
 def health_check():
-    """Health check endpoint สำหรับ Railway"""
     return {
         "status": "healthy",
         "service": "petto-backend",

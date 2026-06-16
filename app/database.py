@@ -8,7 +8,6 @@ import os
 # load_dotenv() is a harmless no-op there (it never overrides existing vars).
 load_dotenv()
 
-# ดึงค่า URL เชื่อมต่อฐานข้อมูล (Supabase pooler ผ่าน .env / Railway env)
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 if not DATABASE_URL:

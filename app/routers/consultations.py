@@ -9,7 +9,7 @@ from app.database import get_db
 
 router = APIRouter(
     prefix="/api/v1",
-    tags=["Vet Consultation (ปรึกษาสัตวแพทย์ - Feature 3)"],
+    tags=["Vet Consultation"],
 )
 
 
@@ -113,10 +113,10 @@ def list_vets(online_only: bool = False, db: Session = Depends(get_db)):
 def create_consultation(payload: ConsultationCreate, db: Session = Depends(get_db)):
     pet = db.query(models.Pet).filter(models.Pet.id == payload.pet_id).first()
     if not pet:
-        raise HTTPException(status_code=404, detail="ไม่พบสัตว์เลี้ยงในระบบ")
+        raise HTTPException(status_code=404, detail="Pet not found")
     vet = db.query(models.Veterinarian).filter(models.Veterinarian.id == payload.vet_id).first()
     if not vet:
-        raise HTTPException(status_code=404, detail="ไม่พบสัตวแพทย์ในระบบ")
+        raise HTTPException(status_code=404, detail="Veterinarian not found")
 
     db_consult = models.Consultation(**payload.model_dump())
     db.add(db_consult)
@@ -129,7 +129,7 @@ def create_consultation(payload: ConsultationCreate, db: Session = Depends(get_d
 def list_pet_consultations(pet_id: int, db: Session = Depends(get_db)):
     pet = db.query(models.Pet).filter(models.Pet.id == pet_id).first()
     if not pet:
-        raise HTTPException(status_code=404, detail="ไม่พบสัตว์เลี้ยงในระบบ")
+        raise HTTPException(status_code=404, detail="Pet not found")
     return db.query(models.Consultation).filter(
         models.Consultation.pet_id == pet_id
     ).order_by(models.Consultation.created_at.desc()).all()
@@ -141,7 +141,7 @@ def get_consultation(consultation_id: int, db: Session = Depends(get_db)):
         models.Consultation.id == consultation_id
     ).first()
     if not consult:
-        raise HTTPException(status_code=404, detail="ไม่พบการปรึกษาในระบบ")
+        raise HTTPException(status_code=404, detail="Consultation not found")
     return consult
 
 
@@ -151,14 +151,14 @@ def update_status(consultation_id: int, payload: StatusUpdate, db: Session = Dep
         models.Consultation.id == consultation_id
     ).first()
     if not consult:
-        raise HTTPException(status_code=404, detail="ไม่พบการปรึกษาในระบบ")
+        raise HTTPException(status_code=404, detail="Consultation not found")
 
     try:
         consult.status = models.ConsultationStatus[payload.status.upper()]
     except KeyError:
         raise HTTPException(
             status_code=400,
-            detail="status ต้องเป็น PENDING / ACTIVE / COMPLETED / CANCELLED",
+            detail="Status must be one of: PENDING, ACTIVE, COMPLETED, CANCELLED",
         )
     db.commit()
     db.refresh(consult)
@@ -166,7 +166,7 @@ def update_status(consultation_id: int, payload: StatusUpdate, db: Session = Dep
 
 
 # ==========================================
-# Messages (chat ในการปรึกษา)
+# Messages
 # ==========================================
 @router.post("/consultations/{consultation_id}/messages", response_model=MessageResponse)
 def send_message(consultation_id: int, payload: MessageCreate, db: Session = Depends(get_db)):
@@ -174,15 +174,15 @@ def send_message(consultation_id: int, payload: MessageCreate, db: Session = Dep
         models.Consultation.id == consultation_id
     ).first()
     if not consult:
-        raise HTTPException(status_code=404, detail="ไม่พบการปรึกษาในระบบ")
+        raise HTTPException(status_code=404, detail="Consultation not found")
 
     if not payload.content and not payload.attachment_uri:
-        raise HTTPException(status_code=400, detail="ต้องมีข้อความหรือไฟล์แนบอย่างน้อยหนึ่งอย่าง")
+        raise HTTPException(status_code=400, detail="Message must have content or an attachment")
 
     try:
         sender = models.MessageSender(payload.sender_type)
     except ValueError:
-        raise HTTPException(status_code=400, detail="sender_type ต้องเป็น 'user' หรือ 'vet'")
+        raise HTTPException(status_code=400, detail="sender_type must be 'user' or 'vet'")
 
     db_msg = models.Message(
         consultation_id=consultation_id,
@@ -203,7 +203,7 @@ def list_messages(consultation_id: int, db: Session = Depends(get_db)):
         models.Consultation.id == consultation_id
     ).first()
     if not consult:
-        raise HTTPException(status_code=404, detail="ไม่พบการปรึกษาในระบบ")
+        raise HTTPException(status_code=404, detail="Consultation not found")
     return db.query(models.Message).filter(
         models.Message.consultation_id == consultation_id
     ).order_by(models.Message.created_at.asc()).all()

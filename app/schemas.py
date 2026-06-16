@@ -1,7 +1,34 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr
 from datetime import datetime, date
 from typing import Optional, List
 from app.models import RiskLevel
+
+# ==========================================
+# Auth
+# ==========================================
+
+class RegisterRequest(BaseModel):
+    email: str
+    password: str
+    name: str
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+class UserResponse(BaseModel):
+    id: int
+    email: str
+    name: Optional[str] = None
+    avatar_uri: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+class AuthResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: UserResponse
 
 # ==========================================
 # Feature 2: Health Assessment
@@ -24,7 +51,6 @@ class AssessmentResponse(BaseModel):
 # ==========================================
 
 class PetCreate(BaseModel):
-    user_id: int
     name: str
     species: Optional[str] = None
     breed: Optional[str] = None

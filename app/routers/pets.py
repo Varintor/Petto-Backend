@@ -4,23 +4,21 @@ from typing import List
 
 from app import models, schemas
 from app.database import get_db
+from app.auth import get_current_user
 
 router = APIRouter(
     prefix="/api/v1",
-    tags=["Pets (สัตว์เลี้ยง)"]
+    tags=["Pets"]
 )
 
 
 @router.post("/pets", response_model=schemas.PetResponse)
-def create_pet(pet: schemas.PetCreate, db: Session = Depends(get_db)):
-    """
-    สร้างโปรไฟล์สัตว์เลี้ยงใหม่
-    """
-    user = db.query(models.User).filter(models.User.id == pet.user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="ไม่พบผู้ใช้ในระบบ")
-
-    db_pet = models.Pet(**pet.model_dump())
+def create_pet(
+    pet: schemas.PetCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    db_pet = models.Pet(user_id=current_user.id, **pet.model_dump())
     db.add(db_pet)
     db.commit()
     db.refresh(db_pet)
@@ -29,32 +27,26 @@ def create_pet(pet: schemas.PetCreate, db: Session = Depends(get_db)):
 
 @router.get("/pets", response_model=List[schemas.PetResponse])
 def get_all_pets(db: Session = Depends(get_db)):
-    """
-    ดูรายการสัตว์เลี้ยงทั้งหมดในระบบ
-    """
+    """List all pets."""
     pets = db.query(models.Pet).all()
     return pets
 
 
 @router.get("/pets/{pet_id}", response_model=schemas.PetResponse)
 def get_pet(pet_id: int, db: Session = Depends(get_db)):
-    """
-    ดูข้อมูลสัตว์เลี้ยงตัวเดียว
-    """
+    """Get a single pet by ID."""
     pet = db.query(models.Pet).filter(models.Pet.id == pet_id).first()
     if not pet:
-        raise HTTPException(status_code=404, detail="ไม่พบสัตว์เลี้ยงในระบบ")
+        raise HTTPException(status_code=404, detail="Pet not found")
     return pet
 
 
 @router.get("/users/{user_id}/pets", response_model=List[schemas.PetResponse])
 def get_user_pets(user_id: int, db: Session = Depends(get_db)):
-    """
-    ดูรายการสัตว์เลี้ยงทั้งหมดของผู้ใช้คนหนึ่ง
-    """
+    """List all pets belonging to a user."""
     user = db.query(models.User).filter(models.User.id == user_id).first()
     if not user:
-        raise HTTPException(status_code=404, detail="ไม่พบผู้ใช้ในระบบ")
+        raise HTTPException(status_code=404, detail="User not found")
 
     pets = db.query(models.Pet).filter(models.Pet.user_id == user_id).all()
     return pets
@@ -62,12 +54,10 @@ def get_user_pets(user_id: int, db: Session = Depends(get_db)):
 
 @router.put("/pets/{pet_id}", response_model=schemas.PetResponse)
 def update_pet(pet_id: int, pet_update: schemas.PetUpdate, db: Session = Depends(get_db)):
-    """
-    แก้ไขข้อมูลสัตว์เลี้ยง
-    """
+    """Update a pet's profile."""
     pet = db.query(models.Pet).filter(models.Pet.id == pet_id).first()
     if not pet:
-        raise HTTPException(status_code=404, detail="ไม่พบสัตว์เลี้ยงในระบบ")
+        raise HTTPException(status_code=404, detail="Pet not found")
 
     update_data = pet_update.model_dump(exclude_unset=True)
     for field, value in update_data.items():
@@ -80,13 +70,11 @@ def update_pet(pet_id: int, pet_update: schemas.PetUpdate, db: Session = Depends
 
 @router.delete("/pets/{pet_id}")
 def delete_pet(pet_id: int, db: Session = Depends(get_db)):
-    """
-    ลบสัตว์เลี้ยง
-    """
+    """Delete a pet."""
     pet = db.query(models.Pet).filter(models.Pet.id == pet_id).first()
     if not pet:
-        raise HTTPException(status_code=404, detail="ไม่พบสัตว์เลี้ยงในระบบ")
+        raise HTTPException(status_code=404, detail="Pet not found")
 
     db.delete(pet)
     db.commit()
-    return {"message": "ลบสัตว์เลี้ยงเรียบร้อยแล้ว"}
+    return {"message": "Pet deleted"}

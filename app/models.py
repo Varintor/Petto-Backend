@@ -53,12 +53,12 @@ ActivitySourceType = Enum(
 # Feature 1: Auth & Profile
 # ==========================================
 class User(Base):
-    """เจ้าของสัตว์เลี้ยง (Feature 1: Authentication & Profile)"""
     __tablename__ = "users"
 
     id = Column(BigInteger, primary_key=True)
+    supabase_uid = Column(String, unique=True, index=True, nullable=True)
     email = Column(String, unique=True, index=True, nullable=False)
-    password_hash = Column(String, nullable=False)
+    password_hash = Column(String, nullable=True)
     name = Column(String, nullable=True)
     avatar_uri = Column(String, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -68,7 +68,6 @@ class User(Base):
 
 
 class Pet(Base):
-    """โปรไฟล์สัตว์เลี้ยง (table: pet_profiles)"""
     __tablename__ = "pet_profiles"
 
     id = Column(BigInteger, primary_key=True)
@@ -190,7 +189,6 @@ class DailyMission(Base):
 
 
 class ActivityLog(Base):
-    """บันทึกกิจกรรม/การเดิน (Feature 4 Mode A = phone, Mode B = device)"""
     __tablename__ = "activity_logs"
 
     id = Column(BigInteger, primary_key=True)
@@ -200,8 +198,12 @@ class ActivityLog(Base):
     activity_type = Column(String, nullable=False)
     duration_minutes = Column(Float, nullable=False, server_default=text("0"))
     distance_meters = Column(Float, nullable=False, server_default=text("0"))
+    calories_burned = Column(Float, nullable=True)
     avg_speed_kmh = Column(Float, nullable=True)
+    max_speed_kmh = Column(Float, nullable=True)
+    steps = Column(BigInteger, nullable=True)
     route_polyline = Column(Text, nullable=True)
+    notes = Column(Text, nullable=True)
     is_mission_completed = Column(Boolean, nullable=False, server_default=text("false"))
     started_at = Column(DateTime(timezone=True), nullable=True)
     ended_at = Column(DateTime(timezone=True), nullable=True)
@@ -212,7 +214,7 @@ class ActivityLog(Base):
 
 
 # ==========================================
-# Vaccinations (สมุดวัคซีน)
+# Vaccinations
 # ==========================================
 class Vaccination(Base):
     __tablename__ = "vaccinations"

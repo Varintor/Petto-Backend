@@ -1,3 +1,5 @@
+import random
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
@@ -10,7 +12,7 @@ from app.database import get_db
 
 router = APIRouter(
     prefix="/api/v1",
-    tags=["Daily Missions (ภารกิจประจำวัน - Feature 4)"],
+    tags=["Daily Missions"],
 )
 
 
@@ -44,18 +46,34 @@ class MissionResponse(BaseModel):
         from_attributes = True
 
 
-# Default daily mission set used by the "seed today" helper.
-_DEFAULT_MISSIONS = [
-    {"title": "Walk for 15 mins", "mission_type": "walk", "target_value": 15, "unit": "minutes", "reward": "50 Treats"},
-    {"title": "Water Log", "mission_type": "water", "target_value": 1, "unit": "count", "reward": "20 Treats"},
-    {"title": "AI Quick Check", "mission_type": "ai_check", "target_value": 1, "unit": "count", "reward": "100 Treats"},
+# Core missions (always included daily)
+_CORE_MISSIONS = [
+    {"title": "Walk for 15 minutes", "mission_type": "walk", "target_value": 15, "unit": "minutes", "reward": "50 Treats"},
+    {"title": "Fresh water refill", "mission_type": "water", "target_value": 1, "unit": "count", "reward": "20 Treats"},
+    {"title": "AI health check", "mission_type": "ai_check", "target_value": 1, "unit": "count", "reward": "100 Treats"},
+]
+
+# Rotating bonus missions (2 picked randomly each day)
+_BONUS_MISSIONS = [
+    {"title": "Brush your pet's fur", "mission_type": "grooming", "target_value": 1, "unit": "count", "reward": "30 Treats"},
+    {"title": "5-minute play session", "mission_type": "play", "target_value": 5, "unit": "minutes", "reward": "40 Treats"},
+    {"title": "Take a cute photo", "mission_type": "photo", "target_value": 1, "unit": "count", "reward": "25 Treats"},
+    {"title": "Teeth check", "mission_type": "dental_check", "target_value": 1, "unit": "count", "reward": "35 Treats"},
+    {"title": "Nail trim check", "mission_type": "nail_check", "target_value": 1, "unit": "count", "reward": "30 Treats"},
+    {"title": "Ear cleaning check", "mission_type": "ear_check", "target_value": 1, "unit": "count", "reward": "30 Treats"},
+    {"title": "Weigh your pet", "mission_type": "weight_log", "target_value": 1, "unit": "count", "reward": "40 Treats"},
+    {"title": "10-minute cuddle time", "mission_type": "bonding", "target_value": 10, "unit": "minutes", "reward": "35 Treats"},
+    {"title": "Train a new trick", "mission_type": "training", "target_value": 1, "unit": "count", "reward": "60 Treats"},
+    {"title": "Check food portion", "mission_type": "feeding_check", "target_value": 1, "unit": "count", "reward": "25 Treats"},
+    {"title": "Eye and nose check", "mission_type": "eye_nose_check", "target_value": 1, "unit": "count", "reward": "30 Treats"},
+    {"title": "Socialization time", "mission_type": "social", "target_value": 1, "unit": "count", "reward": "45 Treats"},
 ]
 
 
 def _require_pet(pet_id: int, db: Session) -> models.Pet:
     pet = db.query(models.Pet).filter(models.Pet.id == pet_id).first()
     if not pet:
-        raise HTTPException(status_code=404, detail="ไม่พบสัตว์เลี้ยงในระบบ")
+        raise HTTPException(status_code=404, detail="Pet not found")
     return pet
 
 
@@ -64,7 +82,7 @@ def _require_pet(pet_id: int, db: Session) -> models.Pet:
 # ==========================================
 @router.post("/missions", response_model=MissionResponse)
 def create_mission(mission: MissionCreate, db: Session = Depends(get_db)):
-    """สร้างภารกิจประจำวัน (1 ภารกิจต่อ pet/วัน/ประเภท)"""
+    """Create a daily mission (one per pet/day/type)."""
     _require_pet(mission.pet_id, db)
 
     db_mission = models.DailyMission(**mission.model_dump(exclude_none=True))
@@ -75,7 +93,7 @@ def create_mission(mission: MissionCreate, db: Session = Depends(get_db)):
         db.rollback()
         raise HTTPException(
             status_code=409,
-            detail="มีภารกิจประเภทนี้ของวันนี้อยู่แล้ว",
+            detail="A mission of this type already exists for today",
         )
     db.refresh(db_mission)
     return db_mission
@@ -87,7 +105,7 @@ def get_pet_missions(
     mission_date: Optional[date] = None,
     db: Session = Depends(get_db),
 ):
-    """ดูภารกิจของสัตว์เลี้ยง (กรองตามวันได้ด้วย ?mission_date=YYYY-MM-DD)"""
+    """List missions for a pet. Filter by date with ?mission_date=YYYY-MM-DD."""
     _require_pet(pet_id, db)
 
     query = db.query(models.DailyMission).filter(models.DailyMission.pet_id == pet_id)
@@ -102,7 +120,7 @@ def get_pet_missions(
 
 @router.get("/pets/{pet_id}/missions/today", response_model=List[MissionResponse])
 def get_today_missions(pet_id: int, db: Session = Depends(get_db)):
-    """ดูภารกิจของวันนี้"""
+    """Get today's missions for a pet."""
     _require_pet(pet_id, db)
     today = datetime.now(timezone.utc).date()
     return db.query(models.DailyMission).filter(
@@ -113,7 +131,7 @@ def get_today_missions(pet_id: int, db: Session = Depends(get_db)):
 
 @router.post("/pets/{pet_id}/missions/seed-today", response_model=List[MissionResponse])
 def seed_today_missions(pet_id: int, db: Session = Depends(get_db)):
-    """สร้างชุดภารกิจเริ่มต้นของวันนี้ (ข้ามอันที่มีอยู่แล้ว)"""
+    """Seed today's missions: 3 core + 2 random bonus (skips duplicates)."""
     _require_pet(pet_id, db)
     today = datetime.now(timezone.utc).date()
 
@@ -125,7 +143,12 @@ def seed_today_missions(pet_id: int, db: Session = Depends(get_db)):
         ).all()
     }
 
-    for spec in _DEFAULT_MISSIONS:
+    day_seed = int(today.strftime("%Y%m%d")) + pet_id
+    rng = random.Random(day_seed)
+    bonus_picks = rng.sample(_BONUS_MISSIONS, k=min(2, len(_BONUS_MISSIONS)))
+    all_missions = _CORE_MISSIONS + bonus_picks
+
+    for spec in all_missions:
         if spec["mission_type"] in existing_types:
             continue
         db.add(models.DailyMission(pet_id=pet_id, mission_date=today, **spec))
@@ -139,12 +162,12 @@ def seed_today_missions(pet_id: int, db: Session = Depends(get_db)):
 
 @router.put("/missions/{mission_id}/complete", response_model=MissionResponse)
 def complete_mission(mission_id: int, is_completed: bool = True, db: Session = Depends(get_db)):
-    """ทำเครื่องหมายภารกิจสำเร็จ/ยกเลิก"""
+    """Mark a mission as completed or undo completion."""
     mission = db.query(models.DailyMission).filter(
         models.DailyMission.id == mission_id
     ).first()
     if not mission:
-        raise HTTPException(status_code=404, detail="ไม่พบภารกิจในระบบ")
+        raise HTTPException(status_code=404, detail="Mission not found")
 
     mission.is_completed = is_completed
     mission.completed_at = datetime.now(timezone.utc) if is_completed else None
@@ -159,7 +182,7 @@ def delete_mission(mission_id: int, db: Session = Depends(get_db)):
         models.DailyMission.id == mission_id
     ).first()
     if not mission:
-        raise HTTPException(status_code=404, detail="ไม่พบภารกิจในระบบ")
+        raise HTTPException(status_code=404, detail="Mission not found")
     db.delete(mission)
     db.commit()
-    return {"message": "ลบภารกิจเรียบร้อยแล้ว"}
+    return {"message": "Mission deleted"}

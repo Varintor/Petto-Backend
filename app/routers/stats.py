@@ -11,7 +11,7 @@ from app.utils.time import now_bkk, today_bkk
 
 router = APIRouter(
     prefix="/api/v1",
-    tags=["Statistics (สถิติ & Dashboard)"]
+    tags=["Statistics"]
 )
 
 
@@ -20,25 +20,16 @@ router = APIRouter(
 # ==========================================
 
 class DashboardStatsResponse(BaseModel):
-    # Health Score (0-100)
     health_score: int
-
-    # Activity Summary (เดือนนี้)
     activities_this_month: int
     total_duration_minutes: float
     total_distance_meters: float
-
-    # Assessment Summary
     last_assessment: Dict[str, Any] | None
     recent_risk_level: str | None
-
-    # Vaccination Status
     vaccination_status: str  # "up_to_date", "due_soon", "overdue"
     next_vaccination_date: datetime | None
-
-    # Mission Progress
     missions_completed_this_week: int
-    mission_streak: int  # ทำติดต่อกันกี่วัน
+    mission_streak: int
 
     class Config:
         from_attributes = True
@@ -57,29 +48,13 @@ class HealthScoreBreakdown(BaseModel):
 
 @router.get("/pets/{pet_id}/stats/dashboard", response_model=DashboardStatsResponse)
 def get_dashboard_stats(pet_id: int, db: Session = Depends(get_db)):
-    """
-    ดูสถิติรวมทั้งหมดของสัตว์เลี้ยงตัวหนึ่ง (สำหรับหน้า Dashboard)
-
-    คำนวณ:
-    - Health Score (คะแนนสุขภาพรวม 0-100)
-    - Activity Summary (กิจกรรมเดือนนี้)
-    - Last Assessment (การประเมินล่าสุด)
-    - Vaccination Status (สถานะวัคซีน)
-    - Mission Progress (ความคืบหน้าภารกิจ)
-    """
-    # ตรวจสอบว่ามีสัตว์เลี้ยงหรือไม่
+    """Aggregated dashboard statistics for a pet."""
     pet = db.query(models.Pet).filter(models.Pet.id == pet_id).first()
     if not pet:
-        raise HTTPException(status_code=404, detail="ไม่พบสัตว์เลี้ยงในระบบ")
+        raise HTTPException(status_code=404, detail="Pet not found")
 
-    # ==========================================
-    # 1. Health Score Calculation
-    # ==========================================
     health_score = _calculate_health_score(pet_id, db)
 
-    # ==========================================
-    # 2. Activity Summary (เดือนนี้)
-    # ==========================================
     month_start = now_bkk().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
     activities = db.query(
@@ -91,9 +66,6 @@ def get_dashboard_stats(pet_id: int, db: Session = Depends(get_db)):
         models.ActivityLog.created_at >= month_start
     ).first()
 
-    # ==========================================
-    # 3. Last Assessment
-    # ==========================================
     last_assessment = db.query(models.HealthAssessment).filter(
         models.HealthAssessment.pet_id == pet_id
     ).order_by(models.HealthAssessment.created_at.desc()).first()
@@ -110,25 +82,18 @@ def get_dashboard_stats(pet_id: int, db: Session = Depends(get_db)):
         }
         recent_risk = last_assessment.risk_level.value
 
-    # ==========================================
-    # 4. Vaccination Status
-    # ==========================================
     vaccinations = db.query(models.Vaccination).filter(
         models.Vaccination.pet_id == pet_id
     ).order_by(models.Vaccination.next_due_date.desc()).all()
 
     vaccination_status, next_vac_date = _get_vaccination_status(vaccinations)
 
-    # ==========================================
-    # 5. Mission Progress
-    # ==========================================
     missions_this_week = db.query(func.count(models.ActivityLog.id)).filter(
         models.ActivityLog.pet_id == pet_id,
         models.ActivityLog.is_mission_completed == True,
         models.ActivityLog.created_at >= now_bkk() - timedelta(days=7)
     ).scalar() or 0
 
-    # คำนวณ Streak (ทำติดต่อกันกี่วัน)
     mission_streak = _calculate_mission_streak(pet_id, db)
 
     return DashboardStatsResponse(
@@ -147,18 +112,15 @@ def get_dashboard_stats(pet_id: int, db: Session = Depends(get_db)):
 
 @router.get("/pets/{pet_id}/stats/health-score", response_model=HealthScoreBreakdown)
 def get_health_score_breakdown(pet_id: int, db: Session = Depends(get_db)):
-    """
-    ดู Health Score แบบละเอียด (แยกเป็นส่วนๆ)
-    """
+    """Health score breakdown by category."""
     pet = db.query(models.Pet).filter(models.Pet.id == pet_id).first()
     if not pet:
-        raise HTTPException(status_code=404, detail="ไม่พบสัตว์เลี้ยงในระบบ")
+        raise HTTPException(status_code=404, detail="Pet not found")
 
     activity_score = _calculate_activity_score(pet_id, db)
     assessment_score = _calculate_assessment_score(pet_id, db)
     vaccination_score = _calculate_vaccination_score(pet_id, db)
 
-    # Overall Score (เฉลี่ยถ่วง)
     overall_score = int(
         (activity_score * 0.4) +
         (assessment_score * 0.4) +
@@ -175,18 +137,13 @@ def get_health_score_breakdown(pet_id: int, db: Session = Depends(get_db)):
 
 @router.get("/pets/{pet_id}/stats/trends")
 def get_health_trends(pet_id: int, days: int = 30, db: Session = Depends(get_db)):
-    """
-    ดู Trend สุขภาพย้อนหลัง X วัน
-
-    ใช้สำหรับกราฟใน Dashboard
-    """
+    """Health trends over the last N days (for dashboard charts)."""
     pet = db.query(models.Pet).filter(models.Pet.id == pet_id).first()
     if not pet:
-        raise HTTPException(status_code=404, detail="ไม่พบสัตว์เลี้ยงในระบบ")
+        raise HTTPException(status_code=404, detail="Pet not found")
 
     start_date = now_bkk() - timedelta(days=days)
 
-    # Activity trend (รายวัน)
     activities = db.query(
         func.date(models.ActivityLog.created_at).label('date'),
         func.sum(models.ActivityLog.duration_minutes).label('duration'),
@@ -199,7 +156,6 @@ def get_health_trends(pet_id: int, days: int = 30, db: Session = Depends(get_db)
         func.date(models.ActivityLog.created_at)
     ).all()
 
-    # Assessment trend
     assessments = db.query(
         func.date(models.HealthAssessment.created_at).label('date'),
         models.HealthAssessment.risk_level
@@ -234,7 +190,6 @@ def get_health_trends(pet_id: int, days: int = 30, db: Session = Depends(get_db)
 # ==========================================
 
 def _calculate_health_score(pet_id: int, db: Session) -> int:
-    """คำนวณ Health Score รวม (0-100)"""
     activity_score = _calculate_activity_score(pet_id, db)
     assessment_score = _calculate_assessment_score(pet_id, db)
     vaccination_score = _calculate_vaccination_score(pet_id, db)
@@ -247,8 +202,6 @@ def _calculate_health_score(pet_id: int, db: Session) -> int:
 
 
 def _calculate_activity_score(pet_id: int, db: Session) -> int:
-    """คำนวณคะแนนจากกิจกรรม (0-100)"""
-    # ดูกิจกรรม 7 วันล่าสุด
     week_ago = now_bkk() - timedelta(days=7)
 
     activities = db.query(
@@ -262,32 +215,27 @@ def _calculate_activity_score(pet_id: int, db: Session) -> int:
     total_minutes = float(activities.total_duration or 0)
     activity_count = activities.count or 0
 
-    # คะแนนจากจำนวนวันที่ออกกำลังกาย
-    active_days = min(activity_count, 7)  # สูงสุด 7 วัน
-    base_score = (active_days / 7) * 60  # 0-60 คะแนน
+    active_days = min(activity_count, 7)
+    base_score = (active_days / 7) * 60
 
-    # โบนัสจากเวลาออกกำลังกาย (เฉลี่ี่อย่างน้อย 30 นาที/วัน)
     if activity_count > 0:
         avg_minutes = total_minutes / activity_count
         if avg_minutes >= 30:
-            base_score += 40  # โบนัสเต็ม
+            base_score += 40
         else:
-            base_score += (avg_minutes / 30) * 40  # โบนัสตามสัดส่วน
+            base_score += (avg_minutes / 30) * 40
 
     return min(int(base_score), 100)
 
 
 def _calculate_assessment_score(pet_id: int, db: Session) -> int:
-    """คำนวณคะแนนจากสถานะสุขภาพ (0-100)"""
-    # ดูการประเมินล่าสุด
     last_assessment = db.query(models.HealthAssessment).filter(
         models.HealthAssessment.pet_id == pet_id
     ).order_by(models.HealthAssessment.created_at.desc()).first()
 
     if not last_assessment:
-        return 70  # ค่าเริ่มต้น ถ้าไม่เคยประเมิน
+        return 70
 
-    # คะแนนตาม Risk Level
     risk_scores = {
         models.RiskLevel.LOW: 90,
         models.RiskLevel.MODERATE: 60,
@@ -296,7 +244,6 @@ def _calculate_assessment_score(pet_id: int, db: Session) -> int:
 
     base_score = risk_scores.get(last_assessment.risk_level, 50)
 
-    # โบนัสถ้าประเมินเมื่อเร็วๆ นี้ (ภายใน 7 วัน)
     days_since = (now_bkk() - last_assessment.created_at).days
     if days_since <= 7:
         base_score += 10
@@ -307,34 +254,31 @@ def _calculate_assessment_score(pet_id: int, db: Session) -> int:
 
 
 def _calculate_vaccination_score(pet_id: int, db: Session) -> int:
-    """คำนวณคะแนนจากสถานะวัคซีน (0-100)"""
     vaccinations = db.query(models.Vaccination).filter(
         models.Vaccination.pet_id == pet_id
     ).order_by(models.Vaccination.date_administered.desc()).all()
 
     if not vaccinations:
-        return 50  # ค่าเริ่มต้น
+        return 50
 
-    # ตรวจสอบวัคซีนล่าสุด
     last_vac = vaccinations[0]
 
     if not last_vac.next_due_date:
-        return 100  # ไม่มีวันนัดต่อ = เสร็จสิ้นแล้ว
+        return 100
 
     days_until_due = (last_vac.next_due_date - today_bkk()).days
 
     if days_until_due < 0:
-        return 20  # เกินวันนัดแล้ว
+        return 20
     elif days_until_due <= 7:
-        return 60  # ใกล้ถึงวันนัด
+        return 60
     elif days_until_due <= 30:
-        return 80   # อีก 1 เดือนถึงวันนัด
+        return 80
     else:
-        return 100  # ยังอีกนาน
+        return 100
 
 
 def _get_vaccination_status(vaccinations: list) -> tuple[str, datetime | None]:
-    """ตรวจสอบสถานะวัคซีน"""
     if not vaccinations:
         return "no_records", None
 
@@ -354,12 +298,10 @@ def _get_vaccination_status(vaccinations: list) -> tuple[str, datetime | None]:
 
 
 def _calculate_mission_streak(pet_id: int, db: Session) -> int:
-    """คำนวณ Streak (ทำติดต่อกันกี่วัน)"""
     streak = 0
     current_date = today_bkk()
 
     while True:
-        # day_start/day_end must be tz-aware to compare with created_at (UTC in DB)
         day_start = datetime.combine(current_date, datetime.min.time(), tzinfo=now_bkk().tzinfo)
         day_end = datetime.combine(current_date, datetime.max.time(), tzinfo=now_bkk().tzinfo)
 
@@ -376,8 +318,7 @@ def _calculate_mission_streak(pet_id: int, db: Session) -> int:
         else:
             break
 
-        # ตรวจสอบไม่ให้วนลูป
-        if streak > 365:  # จำกัด 1 ปี
+        if streak > 365:
             break
 
     return streak
