@@ -50,7 +50,17 @@ def login(req: schemas.LoginRequest, db: Session = Depends(get_db)):
             db.commit()
             db.refresh(user)
         else:
-            raise HTTPException(status_code=404, detail="User record not found")
+            # Auth user exists but has no profile row (e.g. created before the
+            # backend bridge, or directly via Supabase). Self-heal by creating one
+            # so the account can log in instead of 404-ing.
+            user = models.User(
+                supabase_uid=supabase_uid,
+                email=req.email,
+                name=(response.user.user_metadata or {}).get("name"),
+            )
+            db.add(user)
+            db.commit()
+            db.refresh(user)
 
     return schemas.AuthResponse(
         access_token=response.session.access_token,
