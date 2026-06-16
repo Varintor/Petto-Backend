@@ -1,5 +1,6 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
+from pydantic import BaseModel
 
 from app import models, schemas
 from app.database import get_db
@@ -9,6 +10,37 @@ router = APIRouter(
     prefix="/api/v1/auth",
     tags=["Auth"],
 )
+
+
+class EmailCheckResponse(BaseModel):
+    available: bool
+    message: str
+
+
+@router.get("/check-email", response_model=EmailCheckResponse)
+def check_email_availability(email: str = Query(..., description="Email to check"), db: Session = Depends(get_db)):
+    """Check if an email is already registered.
+
+    Returns:
+        - available: true if email can be used (not registered)
+        - available: false if email already exists
+    """
+    # Normalize email for consistent checking
+    email_lower = email.lower().strip()
+
+    # Check in our database
+    existing = db.query(models.User).filter(models.User.email == email_lower).first()
+    if existing:
+        return EmailCheckResponse(
+            available=False,
+            message="This email is already registered"
+        )
+
+    # Email is available (will also verify against Supabase on actual registration)
+    return EmailCheckResponse(
+        available=True,
+        message="Email is available"
+    )
 
 
 @router.post("/register", response_model=schemas.AuthResponse)
