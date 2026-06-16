@@ -17,18 +17,35 @@ def register(req: schemas.RegisterRequest, db: Session = Depends(get_db)):
     if existing:
         raise HTTPException(status_code=409, detail="Email already registered")
 
-    response = register_user(req.email, req.password)
+    try:
+        response = register_user(req.email, req.password)
+        supabase_uid = response.user.id
+        access_token = response.session.access_token if response.session else ""
+    except HTTPException:
+        raise
+    except Exception:
+        # The email already exists in Supabase Auth but has no public.users row
+        # (e.g. a half-finished earlier signup). Recover by signing in instead of
+        # 500-ing, so the account becomes usable.
+        login_resp = login_user(req.email, req.password)
+        supabase_uid = login_resp.user.id
+        access_token = login_resp.session.access_token
+
+    # sign_up may not return a session (e.g. confirmation flow). Get one via
+    # sign_in so the client always receives a usable token for the immediate
+    # create-pet call that follows registration.
+    if not access_token:
+        login_resp = login_user(req.email, req.password)
+        access_token = login_resp.session.access_token
 
     user = models.User(
-        supabase_uid=response.user.id,
+        supabase_uid=supabase_uid,
         email=req.email,
         name=req.name,
     )
     db.add(user)
     db.commit()
     db.refresh(user)
-
-    access_token = response.session.access_token if response.session else ""
 
     return schemas.AuthResponse(
         access_token=access_token,
