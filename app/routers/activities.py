@@ -73,7 +73,13 @@ class ActivityStatsResponse(BaseModel):
 
 @router.post("/activities", response_model=ActivityResponse)
 def create_activity(activity: ActivityCreate, db: Session = Depends(get_db)):
-    """Record a pet activity session (walk, run, play, etc.)."""
+    """Record a pet activity session (walk, run, play, etc.).
+
+    Automatically completes today's walk mission when:
+    - Activity is walk-related (walking/running)
+    - Duration >= 15 minutes
+    - Frontend marks is_mission_completed=true
+    """
     pet = db.query(models.Pet).filter(models.Pet.id == activity.pet_id).first()
     if not pet:
         raise HTTPException(status_code=404, detail="Pet not found")
@@ -89,7 +95,37 @@ def create_activity(activity: ActivityCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(db_activity)
 
+    # Auto-complete today's walk mission if conditions are met
+    if _should_complete_walk_mission(activity):
+        _complete_walk_mission(activity.pet_id, db)
+
     return db_activity
+
+
+def _should_complete_walk_mission(activity: ActivityCreate) -> bool:
+    """Check if activity qualifies for walk mission completion."""
+    walk_types = {"walking", "running"}
+    return (
+        activity.activity_type.lower() in walk_types
+        and activity.duration_minutes >= 15
+        and activity.is_mission_completed
+    )
+
+
+def _complete_walk_mission(pet_id: int, db: Session):
+    """Mark today's walk mission as completed."""
+    today = now_bkk().date()
+    walk_mission = db.query(models.DailyMission).filter(
+        models.DailyMission.pet_id == pet_id,
+        models.DailyMission.mission_type == "walk",
+        models.DailyMission.mission_date == today,
+        models.DailyMission.is_completed == False
+    ).first()
+
+    if walk_mission:
+        walk_mission.is_completed = True
+        walk_mission.completed_at = now_bkk()
+        db.commit()
 
 
 @router.get("/activities", response_model=List[ActivityResponse])
