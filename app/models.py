@@ -114,8 +114,14 @@ class Veterinarian(Base):
     __tablename__ = "veterinarians"
 
     id = Column(BigInteger, primary_key=True)
+    # Bridges this row to Supabase Auth (matches users.supabase_uid behaviour).
+    # Nullable so legacy rows created before the Supabase-Auth flow can exist.
+    supabase_uid = Column(String, unique=True, index=True, nullable=True)
     email = Column(String, unique=True, index=True, nullable=False)
-    password_hash = Column(String, nullable=False)
+    # Retained nullable for backwards-compatibility with rows that pre-date the
+    # Supabase-Auth migration. New vet accounts authenticate via Supabase Auth
+    # and leave this column NULL.
+    password_hash = Column(String, nullable=True)
     name = Column(String, nullable=False)
     clinic_name = Column(String, nullable=True)
     license_number = Column(String, unique=True, nullable=True)
@@ -202,7 +208,8 @@ class ActivityLog(Base):
     avg_speed_kmh = Column(Float, nullable=True)
     max_speed_kmh = Column(Float, nullable=True)
     steps = Column(BigInteger, nullable=True)
-    route_polyline = Column(Text, nullable=True)
+    # NOTE: raw GPS route is NOT persisted (Petto proposal §3.7).
+    # Only aggregated metrics (distance, duration, speed) are stored here.
     notes = Column(Text, nullable=True)
     is_mission_completed = Column(Boolean, nullable=False, server_default=text("false"))
     started_at = Column(DateTime(timezone=True), nullable=True)
