@@ -8,7 +8,7 @@ from supabase import create_client, Client
 from google import genai
 
 from app import models, schemas
-from app.database import get_db
+from app.database import SessionLocal, get_db
 
 router = APIRouter(
     prefix="/api/v1",
@@ -65,8 +65,11 @@ async def create_assessment(
     pet_id: int = Form(...),
     symptom_description: str = Form(...),
     image: UploadFile = File(...),
-    db: Session = Depends(get_db)
 ):
+    # No Depends(get_db) here — Supabase upload + Gemini take 5-30s and would
+    # otherwise hold a pooled DB connection idle that whole time, draining the
+    # pool under concurrent load. We open a short-lived session at the end
+    # only when there's actually a row to insert.
     if not image.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="File must be an image")
 
@@ -74,7 +77,7 @@ async def create_assessment(
         file_bytes = await image.read()
         file_extension = image.filename.split(".")[-1]
         unique_filename = f"{pet_id}_{uuid.uuid4().hex}.{file_extension}"
-        
+
         supabase.storage.from_("pet-images").upload(
             path=unique_filename, file=file_bytes, file_options={"content-type": image.content_type}
         )
@@ -161,16 +164,20 @@ Risk: HIGH"""
         except Exception as e:
             ai_response_text = f"AI analysis failed: {str(e)}"
 
-    new_assessment = models.HealthAssessment(
-        pet_id=pet_id,
-        symptom_description=symptom_description,
-        image_uri=actual_image_uri,
-        risk_level=ai_risk_level,
-        ai_raw_response=ai_response_text
-    )
-    
-    db.add(new_assessment)
-    db.commit()
-    db.refresh(new_assessment)
-
-    return new_assessment
+    # Open the DB session only now that the slow work (Supabase upload + Gemini
+    # call) is complete. The connection is held for <1s instead of 5-30s.
+    with SessionLocal() as db:
+        new_assessment = models.HealthAssessment(
+            pet_id=pet_id,
+            symptom_description=symptom_description,
+            image_uri=actual_image_uri,
+            risk_level=ai_risk_level,
+            ai_raw_response=ai_response_text
+        )
+        db.add(new_assessment)
+        db.commit()
+        db.refresh(new_assessment)
+        # Detach so the caller can serialize the ORM object after the session
+        # closes (FastAPI's response_model will read attributes off it).
+        db.expunge(new_assessment)
+        return new_assessment
