@@ -20,6 +20,9 @@ if not DATABASE_URL:
 # Supavisor pooler / serverless), pool_recycle avoids stale long-lived ones.
 engine = create_engine(
     DATABASE_URL,
+    pool_size=10,
+    max_overflow=20,
+    pool_timeout=30,
     pool_pre_ping=True,
     pool_recycle=1800,
 )
