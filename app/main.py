@@ -5,6 +5,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from app.database import SessionLocal, get_db
 from app import models
+from app.readiness import check_readiness
 
 from app.routers import (
     auth, vaccinations, assessments, pets, activities, stats, missions, consultations,
@@ -67,6 +68,13 @@ def health_check():
         "service": "petto-backend",
         "version": "1.0.0"
     }
+
+
+@app.get("/ready", tags=["System"])
+def readiness_check():
+    result = check_readiness()
+    payload = {"status": "ready" if result.ready else "not_ready", **result.to_dict()}
+    return JSONResponse(status_code=200 if result.ready else 503, content=payload)
 
 @app.get("/api/v1/setup-mock-data", tags=["System"])
 def setup_mock_data(db: Session = Depends(get_db)):

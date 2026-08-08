@@ -10,6 +10,7 @@ import os
 # Must be set BEFORE importing app.* so module-level clients init as None and
 # database.py builds a throwaway engine (the real engine is overridden below).
 os.environ["DATABASE_URL"] = "sqlite://"
+os.environ["APP_ENV"] = "test"
 os.environ["SUPABASE_URL"] = ""
 os.environ["SUPABASE_KEY"] = ""
 os.environ["GEMINI_API_KEY"] = ""
