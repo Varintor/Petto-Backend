@@ -96,6 +96,9 @@ temp/
 *.temp
 .cache/
 
+### Local assistant tooling
+.claude/
+
 ### OS generated files
 # Mac
 .DS_Store
