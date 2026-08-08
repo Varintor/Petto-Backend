@@ -1,5 +1,6 @@
+import asyncio
+import logging
 import os
-import time
 import uuid
 from typing import List
 from fastapi import APIRouter, Depends, File, UploadFile, Form, HTTPException
@@ -8,7 +9,8 @@ from supabase import create_client, Client
 from google import genai
 
 from app import models, schemas
-from app.database import SessionLocal, get_db
+from app.auth import get_current_user, get_supabase_uid, require_owned_pet
+from app.database import get_db, get_session_factory
 
 router = APIRouter(
     prefix="/api/v1",
@@ -22,32 +24,80 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
+logger = logging.getLogger("petto.assessments")
+MAX_IMAGE_BYTES = int(os.getenv("MAX_ASSESSMENT_IMAGE_BYTES", 10 * 1024 * 1024))
+EXTERNAL_TIMEOUT_SECONDS = float(
+    os.getenv("ASSESSMENT_EXTERNAL_TIMEOUT_SECONDS", "30")
+)
+AI_RETRY_BASE_SECONDS = float(
+    os.getenv("ASSESSMENT_AI_RETRY_BASE_SECONDS", "1.5")
+)
+
+_IMAGE_SIGNATURES = (
+    ("image/jpeg", ".jpg", lambda data: data.startswith(b"\xff\xd8\xff")),
+    ("image/png", ".png", lambda data: data.startswith(b"\x89PNG\r\n\x1a\n")),
+    (
+        "image/webp",
+        ".webp",
+        lambda data: len(data) >= 12
+        and data.startswith(b"RIFF")
+        and data[8:12] == b"WEBP",
+    ),
+)
+
+
+def _validated_image_type(data: bytes) -> tuple[str, str] | None:
+    for mime_type, extension, matches in _IMAGE_SIGNATURES:
+        if matches(data):
+            return mime_type, extension
+    return None
+
+
+async def _run_blocking(callable_):
+    return await asyncio.wait_for(
+        asyncio.to_thread(callable_), timeout=EXTERNAL_TIMEOUT_SECONDS
+    )
+
 # ==========================================
 # GET Endpoints
 # ==========================================
 
 @router.get("/assessments", response_model=List[schemas.AssessmentResponse])
-def get_all_assessments(db: Session = Depends(get_db)):
-    """List all assessments."""
-    assessments = db.query(models.HealthAssessment).order_by(models.HealthAssessment.created_at.desc()).all()
+def get_my_assessments(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """List all assessments across the caller's pets."""
+    assessments = db.query(models.HealthAssessment).join(
+        models.Pet, models.HealthAssessment.pet_id == models.Pet.id
+    ).filter(
+        models.Pet.user_id == current_user.id
+    ).order_by(models.HealthAssessment.created_at.desc()).all()
     return assessments
 
 
 @router.get("/assessments/{assessment_id}", response_model=schemas.AssessmentResponse)
-def get_assessment(assessment_id: int, db: Session = Depends(get_db)):
-    """Get a single assessment by ID."""
+def get_assessment(
+    assessment_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Get a single assessment by ID (owner only)."""
     assessment = db.query(models.HealthAssessment).filter(models.HealthAssessment.id == assessment_id).first()
     if not assessment:
         raise HTTPException(status_code=404, detail="Assessment not found")
+    require_owned_pet(assessment.pet_id, current_user, db)
     return assessment
 
 
 @router.get("/pets/{pet_id}/assessments", response_model=List[schemas.AssessmentResponse])
-def get_pet_assessments(pet_id: int, db: Session = Depends(get_db)):
-    """List all assessments for a specific pet."""
-    pet = db.query(models.Pet).filter(models.Pet.id == pet_id).first()
-    if not pet:
-        raise HTTPException(status_code=404, detail="Pet not found")
+def get_pet_assessments(
+    pet_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """List all assessments for a specific pet (owner only)."""
+    require_owned_pet(pet_id, current_user, db)
 
     assessments = db.query(models.HealthAssessment).filter(
         models.HealthAssessment.pet_id == pet_id
@@ -65,29 +115,65 @@ async def create_assessment(
     pet_id: int = Form(...),
     symptom_description: str = Form(...),
     image: UploadFile = File(...),
+    supabase_uid: str = Depends(get_supabase_uid),
+    session_factory=Depends(get_session_factory),
 ):
     # No Depends(get_db) here — Supabase upload + Gemini take 5-30s and would
     # otherwise hold a pooled DB connection idle that whole time, draining the
-    # pool under concurrent load. We open a short-lived session at the end
-    # only when there's actually a row to insert.
-    if not image.content_type.startswith("image/"):
+    # pool under concurrent load. Auth uses get_supabase_uid (token check only,
+    # no DB); user lookup + pet ownership run in a short-lived session below.
+    if not (image.content_type or "").startswith("image/"):
         raise HTTPException(status_code=400, detail="File must be an image")
 
-    try:
-        file_bytes = await image.read()
-        file_extension = image.filename.split(".")[-1]
-        unique_filename = f"{pet_id}_{uuid.uuid4().hex}.{file_extension}"
+    # Ownership check up-front, then release the connection before slow work.
+    with session_factory() as db:
+        current_user = db.query(models.User).filter(
+            models.User.supabase_uid == supabase_uid
+        ).first()
+        if not current_user:
+            raise HTTPException(status_code=401, detail="User not found")
+        require_owned_pet(pet_id, current_user, db)
 
-        supabase.storage.from_("pet-images").upload(
-            path=unique_filename, file=file_bytes, file_options={"content-type": image.content_type}
+    try:
+        file_bytes = await image.read(MAX_IMAGE_BYTES + 1)
+        if len(file_bytes) > MAX_IMAGE_BYTES:
+            raise HTTPException(status_code=413, detail="Image is too large")
+
+        validated_type = _validated_image_type(file_bytes)
+        if validated_type is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Unsupported or invalid image. Use JPEG, PNG, or WebP.",
+            )
+        mime_type, extension = validated_type
+        unique_filename = f"{pet_id}_{uuid.uuid4().hex}{extension}"
+
+        if supabase is None:
+            raise HTTPException(status_code=503, detail="Image storage is unavailable")
+        bucket = supabase.storage.from_("pet-images")
+        await _run_blocking(
+            lambda: bucket.upload(
+                path=unique_filename,
+                file=file_bytes,
+                file_options={"content-type": mime_type},
+            )
         )
-        actual_image_uri = supabase.storage.from_("pet-images").get_public_url(unique_filename)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+        actual_image_uri = await _run_blocking(
+            lambda: bucket.get_public_url(unique_filename)
+        )
+    except HTTPException:
+        raise
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="Image upload timed out")
+    except Exception:
+        logger.exception("Assessment image upload failed for pet_id=%s", pet_id)
+        raise HTTPException(status_code=502, detail="Image upload failed")
 
     # 2. Analyse image + symptoms with Gemini
-    ai_risk_level = models.RiskLevel.MODERATE
-    ai_response_text = "AI service unavailable"
+    ai_risk_level = None
+    ai_response_text = None
+    assessment_status = "failed"
+    error_code = "AI_SERVICE_UNAVAILABLE"
 
     if gemini_client:
         try:
@@ -127,7 +213,7 @@ Risk: HIGH"""
                 prompt,
                 {
                     "inline_data": {
-                        "mime_type": image.content_type,
+                        "mime_type": mime_type,
                         "data": file_bytes
                     }
                 }
@@ -136,16 +222,18 @@ Risk: HIGH"""
             last_err = None
             for attempt in range(4):
                 try:
-                    response = gemini_client.models.generate_content(
-                        model='models/gemini-flash-latest',
-                        contents=contents
+                    response = await _run_blocking(
+                        lambda: gemini_client.models.generate_content(
+                            model='models/gemini-flash-latest',
+                            contents=contents,
+                        )
                     )
                     break
                 except Exception as retry_err:
                     last_err = retry_err
                     msg = str(retry_err)
                     if any(s in msg for s in ("503", "UNAVAILABLE", "overload", "high demand", "429")):
-                        time.sleep(1.5 * (attempt + 1))
+                        await asyncio.sleep(AI_RETRY_BASE_SECONDS * (attempt + 1))
                         continue
                     raise
             if response is None:
@@ -154,25 +242,39 @@ Risk: HIGH"""
             ai_response_text = response.text
 
             last_line = ai_response_text.strip().rsplit("\n", 1)[-1].strip().upper()
-            if "HIGH" in last_line:
-                ai_risk_level = models.RiskLevel.HIGH
-            elif "LOW" in last_line:
-                ai_risk_level = models.RiskLevel.LOW
-            else:
-                ai_risk_level = models.RiskLevel.MODERATE
+            risk_by_line = {
+                "RISK: HIGH": models.RiskLevel.HIGH,
+                "RISK: MODERATE": models.RiskLevel.MODERATE,
+                "RISK: LOW": models.RiskLevel.LOW,
+            }
+            ai_risk_level = risk_by_line.get(last_line)
+            if ai_risk_level is None:
+                error_code = "AI_INVALID_RESPONSE"
+                raise ValueError("Gemini response did not contain a valid risk line")
+            assessment_status = "completed"
+            error_code = None
 
-        except Exception as e:
-            ai_response_text = f"AI analysis failed: {str(e)}"
+        except asyncio.TimeoutError:
+            logger.warning("Gemini timed out for pet_id=%s", pet_id)
+            ai_response_text = None
+            error_code = "AI_TIMEOUT"
+        except Exception:
+            logger.exception("Gemini analysis failed for pet_id=%s", pet_id)
+            ai_response_text = None
+            if error_code != "AI_INVALID_RESPONSE":
+                error_code = "AI_UPSTREAM_ERROR"
 
     # Open the DB session only now that the slow work (Supabase upload + Gemini
     # call) is complete. The connection is held for <1s instead of 5-30s.
-    with SessionLocal() as db:
+    with session_factory() as db:
         new_assessment = models.HealthAssessment(
             pet_id=pet_id,
             symptom_description=symptom_description,
             image_uri=actual_image_uri,
             risk_level=ai_risk_level,
-            ai_raw_response=ai_response_text
+            ai_raw_response=ai_response_text,
+            status=assessment_status,
+            error_code=error_code,
         )
         db.add(new_assessment)
         db.commit()
