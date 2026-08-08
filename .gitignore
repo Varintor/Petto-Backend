@@ -39,11 +39,11 @@ htmlcov/
 # pyenv
 # .python-version
 
-# Test and debug files (เฉพาะโปรเจกต์นี้)
-test_*.py
+# Local debug/helper files.  Do not ignore pytest files: the test suite lives
+# under tests/ and must be committed so CI and every developer run the same
+# regression checks.
 list_*.py
 find_*.py
-*_test.py
 *_manual.sh
 debug_*.py
 

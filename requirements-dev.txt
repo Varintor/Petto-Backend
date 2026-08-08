@@ -1,0 +1,5 @@
+# Test-only dependencies (not needed for production runtime).
+# Install with:  pip install -r requirements-dev.txt
+-r requirements.txt
+pytest>=8.0
+# httpx is already pinned transitively via Starlette's TestClient.
