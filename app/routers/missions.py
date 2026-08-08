@@ -4,11 +4,13 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from typing import List, Optional
-from datetime import datetime, timezone, date
+from datetime import datetime, date
 from pydantic import BaseModel
 
 from app import models
 from app.database import get_db
+from app.auth import get_current_user, require_owned_pet
+from app.utils.time import now_bkk, today_bkk
 
 router = APIRouter(
     prefix="/api/v1",
@@ -70,20 +72,28 @@ _BONUS_MISSIONS = [
 ]
 
 
-def _require_pet(pet_id: int, db: Session) -> models.Pet:
-    pet = db.query(models.Pet).filter(models.Pet.id == pet_id).first()
-    if not pet:
-        raise HTTPException(status_code=404, detail="Pet not found")
-    return pet
+def _require_owned_mission(mission_id: int, current_user: models.User, db: Session) -> models.DailyMission:
+    """Return the mission only if it exists and its pet belongs to the caller."""
+    mission = db.query(models.DailyMission).filter(
+        models.DailyMission.id == mission_id
+    ).first()
+    if not mission:
+        raise HTTPException(status_code=404, detail="Mission not found")
+    require_owned_pet(mission.pet_id, current_user, db)
+    return mission
 
 
 # ==========================================
 # Endpoints
 # ==========================================
 @router.post("/missions", response_model=MissionResponse)
-def create_mission(mission: MissionCreate, db: Session = Depends(get_db)):
+def create_mission(
+    mission: MissionCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
     """Create a daily mission (one per pet/day/type)."""
-    _require_pet(mission.pet_id, db)
+    require_owned_pet(mission.pet_id, current_user, db)
 
     db_mission = models.DailyMission(**mission.model_dump(exclude_none=True))
     db.add(db_mission)
@@ -104,9 +114,10 @@ def get_pet_missions(
     pet_id: int,
     mission_date: Optional[date] = None,
     db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
 ):
     """List missions for a pet. Filter by date with ?mission_date=YYYY-MM-DD."""
-    _require_pet(pet_id, db)
+    require_owned_pet(pet_id, current_user, db)
 
     query = db.query(models.DailyMission).filter(models.DailyMission.pet_id == pet_id)
     if mission_date is not None:
@@ -119,10 +130,17 @@ def get_pet_missions(
 
 
 @router.get("/pets/{pet_id}/missions/today", response_model=List[MissionResponse])
-def get_today_missions(pet_id: int, db: Session = Depends(get_db)):
+def get_today_missions(
+    pet_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
     """Get today's missions for a pet."""
-    _require_pet(pet_id, db)
-    today = datetime.now(timezone.utc).date()
+    require_owned_pet(pet_id, current_user, db)
+    # Bangkok date, matching activities.py's walk-mission auto-complete.
+    # (Using UTC here made "today" disagree with the auto-complete between
+    # 00:00-07:00 ICT, so a finished walk couldn't find its mission.)
+    today = today_bkk()
     return db.query(models.DailyMission).filter(
         models.DailyMission.pet_id == pet_id,
         models.DailyMission.mission_date == today,
@@ -130,10 +148,14 @@ def get_today_missions(pet_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/pets/{pet_id}/missions/seed-today", response_model=List[MissionResponse])
-def seed_today_missions(pet_id: int, db: Session = Depends(get_db)):
+def seed_today_missions(
+    pet_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
     """Seed today's missions: 3 core + 2 random bonus (skips duplicates)."""
-    _require_pet(pet_id, db)
-    today = datetime.now(timezone.utc).date()
+    require_owned_pet(pet_id, current_user, db)
+    today = today_bkk()
 
     existing_types = {
         m.mission_type
@@ -161,28 +183,29 @@ def seed_today_missions(pet_id: int, db: Session = Depends(get_db)):
 
 
 @router.put("/missions/{mission_id}/complete", response_model=MissionResponse)
-def complete_mission(mission_id: int, is_completed: bool = True, db: Session = Depends(get_db)):
-    """Mark a mission as completed or undo completion."""
-    mission = db.query(models.DailyMission).filter(
-        models.DailyMission.id == mission_id
-    ).first()
-    if not mission:
-        raise HTTPException(status_code=404, detail="Mission not found")
+def complete_mission(
+    mission_id: int,
+    is_completed: bool = True,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Mark a mission as completed or undo completion (owner only)."""
+    mission = _require_owned_mission(mission_id, current_user, db)
 
     mission.is_completed = is_completed
-    mission.completed_at = datetime.now(timezone.utc) if is_completed else None
+    mission.completed_at = now_bkk() if is_completed else None
     db.commit()
     db.refresh(mission)
     return mission
 
 
 @router.delete("/missions/{mission_id}")
-def delete_mission(mission_id: int, db: Session = Depends(get_db)):
-    mission = db.query(models.DailyMission).filter(
-        models.DailyMission.id == mission_id
-    ).first()
-    if not mission:
-        raise HTTPException(status_code=404, detail="Mission not found")
+def delete_mission(
+    mission_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    mission = _require_owned_mission(mission_id, current_user, db)
     db.delete(mission)
     db.commit()
     return {"message": "Mission deleted"}

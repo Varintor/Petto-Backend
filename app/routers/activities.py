@@ -7,6 +7,7 @@ from pydantic import BaseModel
 
 from app import models
 from app.database import get_db
+from app.auth import get_current_user, require_owned_pet
 from app.utils.time import now_bkk
 
 router = APIRouter(
@@ -22,6 +23,7 @@ router = APIRouter(
 class ActivityCreate(BaseModel):
     pet_id: int
     mission_id: int | None = None
+    source: str = "phone"  # phone | device (BLE collar)
     activity_type: str  # walking, running, playing, resting, feeding
     duration_minutes: float
     distance_meters: float = 0.0
@@ -72,7 +74,11 @@ class ActivityStatsResponse(BaseModel):
 # ==========================================
 
 @router.post("/activities", response_model=ActivityResponse)
-def create_activity(activity: ActivityCreate, db: Session = Depends(get_db)):
+def create_activity(
+    activity: ActivityCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
     """Record a pet activity session (walk, run, play, etc.).
 
     Automatically completes today's walk mission when:
@@ -80,11 +86,13 @@ def create_activity(activity: ActivityCreate, db: Session = Depends(get_db)):
     - Duration >= 15 minutes
     - Frontend marks is_mission_completed=true
     """
-    pet = db.query(models.Pet).filter(models.Pet.id == activity.pet_id).first()
-    if not pet:
-        raise HTTPException(status_code=404, detail="Pet not found")
+    pet = require_owned_pet(activity.pet_id, current_user, db)
 
     data = activity.model_dump(exclude_none=True)
+    try:
+        data["source"] = models.ActivitySource(data.get("source", "phone"))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="source must be 'phone' or 'device'")
     if activity.calories_burned is None and activity.duration_minutes > 0:
         weight = float(pet.weight_kg) if pet.weight_kg else 5.0
         met = {"walking": 3.0, "running": 6.0, "playing": 4.0}.get(activity.activity_type, 3.0)
@@ -92,12 +100,14 @@ def create_activity(activity: ActivityCreate, db: Session = Depends(get_db)):
 
     db_activity = models.ActivityLog(**data)
     db.add(db_activity)
-    db.commit()
-    db.refresh(db_activity)
+    # Defer commit to ensure atomicity with mission update
 
     # Auto-complete today's walk mission if conditions are met
     if _should_complete_walk_mission(activity):
         _complete_walk_mission(activity.pet_id, db)
+
+    db.commit()
+    db.refresh(db_activity)
 
     return db_activity
 
@@ -125,24 +135,32 @@ def _complete_walk_mission(pet_id: int, db: Session):
     if walk_mission:
         walk_mission.is_completed = True
         walk_mission.completed_at = now_bkk()
-        db.commit()
 
 
 @router.get("/activities", response_model=List[ActivityResponse])
-def get_all_activities(db: Session = Depends(get_db)):
-    """List all activities."""
-    activities = db.query(models.ActivityLog).order_by(
+def get_my_activities(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """List all activities across the caller's pets."""
+    activities = db.query(models.ActivityLog).join(
+        models.Pet, models.ActivityLog.pet_id == models.Pet.id
+    ).filter(
+        models.Pet.user_id == current_user.id
+    ).order_by(
         models.ActivityLog.created_at.desc()
     ).all()
     return activities
 
 
 @router.get("/pets/{pet_id}/activities", response_model=List[ActivityResponse])
-def get_pet_activities(pet_id: int, db: Session = Depends(get_db)):
-    """List all activities for a specific pet."""
-    pet = db.query(models.Pet).filter(models.Pet.id == pet_id).first()
-    if not pet:
-        raise HTTPException(status_code=404, detail="Pet not found")
+def get_pet_activities(
+    pet_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """List all activities for a specific pet (owner only)."""
+    require_owned_pet(pet_id, current_user, db)
 
     activities = db.query(models.ActivityLog).filter(
         models.ActivityLog.pet_id == pet_id
@@ -154,11 +172,13 @@ def get_pet_activities(pet_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/pets/{pet_id}/activities/today", response_model=List[ActivityResponse])
-def get_today_activities(pet_id: int, db: Session = Depends(get_db)):
-    """List all of today's activities for a pet."""
-    pet = db.query(models.Pet).filter(models.Pet.id == pet_id).first()
-    if not pet:
-        raise HTTPException(status_code=404, detail="Pet not found")
+def get_today_activities(
+    pet_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """List all of today's activities for a pet (owner only)."""
+    require_owned_pet(pet_id, current_user, db)
 
     today_start = now_bkk().replace(hour=0, minute=0, second=0, microsecond=0)
 
@@ -169,11 +189,13 @@ def get_today_activities(pet_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/pets/{pet_id}/activities/stats", response_model=ActivityStatsResponse)
-def get_activity_stats(pet_id: int, db: Session = Depends(get_db)):
-    """Aggregated activity statistics for a pet (useful for vet reports)."""
-    pet = db.query(models.Pet).filter(models.Pet.id == pet_id).first()
-    if not pet:
-        raise HTTPException(status_code=404, detail="Pet not found")
+def get_activity_stats(
+    pet_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Aggregated activity statistics for a pet (owner only)."""
+    require_owned_pet(pet_id, current_user, db)
 
     stats = db.query(
         func.count(models.ActivityLog.id).label('total'),
@@ -201,15 +223,25 @@ def get_activity_stats(pet_id: int, db: Session = Depends(get_db)):
     )
 
 
-@router.put("/activities/{activity_id}", response_model=ActivityResponse)
-def update_activity(activity_id: int, is_completed: bool = True, db: Session = Depends(get_db)):
-    """Update activity mission completion status."""
+def _require_owned_activity(activity_id: int, current_user: models.User, db: Session) -> models.ActivityLog:
     activity = db.query(models.ActivityLog).filter(
         models.ActivityLog.id == activity_id
     ).first()
-
     if not activity:
         raise HTTPException(status_code=404, detail="Activity not found")
+    require_owned_pet(activity.pet_id, current_user, db)
+    return activity
+
+
+@router.put("/activities/{activity_id}", response_model=ActivityResponse)
+def update_activity(
+    activity_id: int,
+    is_completed: bool = True,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Update activity mission completion status (owner only)."""
+    activity = _require_owned_activity(activity_id, current_user, db)
 
     activity.is_mission_completed = is_completed
     db.commit()
@@ -219,14 +251,13 @@ def update_activity(activity_id: int, is_completed: bool = True, db: Session = D
 
 
 @router.delete("/activities/{activity_id}")
-def delete_activity(activity_id: int, db: Session = Depends(get_db)):
-    """Delete an activity."""
-    activity = db.query(models.ActivityLog).filter(
-        models.ActivityLog.id == activity_id
-    ).first()
-
-    if not activity:
-        raise HTTPException(status_code=404, detail="Activity not found")
+def delete_activity(
+    activity_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Delete an activity (owner only)."""
+    activity = _require_owned_activity(activity_id, current_user, db)
 
     db.delete(activity)
     db.commit()
