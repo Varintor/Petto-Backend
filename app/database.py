@@ -18,14 +18,18 @@ if not DATABASE_URL:
 
 # pool_pre_ping recycles dead connections (important behind the Supabase
 # Supavisor pooler / serverless), pool_recycle avoids stale long-lived ones.
-engine = create_engine(
-    DATABASE_URL,
-    pool_size=10,
-    max_overflow=20,
-    pool_timeout=30,
-    pool_pre_ping=True,
-    pool_recycle=1800,
-)
+# SQLite (used by the test suite) runs on SingletonThreadPool, which rejects
+# the QueuePool sizing kwargs — only pass them for real server databases.
+_engine_kwargs = {"pool_pre_ping": True}
+if not DATABASE_URL.startswith("sqlite"):
+    _engine_kwargs.update(
+        pool_size=10,
+        max_overflow=20,
+        pool_timeout=30,
+        pool_recycle=1800,
+    )
+
+engine = create_engine(DATABASE_URL, **_engine_kwargs)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 def get_db():
@@ -34,3 +38,14 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+def get_session_factory():
+    """Dependency returning the sessionmaker itself (not an open session).
+
+    Slow endpoints (Supabase upload + Gemini can take 5-30s) use this to open
+    short-lived sessions around their DB reads/writes instead of holding a
+    pooled connection for the whole request. Tests override this dependency
+    to point at the in-memory test engine.
+    """
+    return SessionLocal

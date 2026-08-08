@@ -1,5 +1,5 @@
 from sqlalchemy import (
-    Column, BigInteger, String, DateTime, Date, ForeignKey, Enum, Text,
+    Column, BigInteger, Integer, String, DateTime, Date, ForeignKey, Enum, Text,
     Float, Boolean, Numeric, UniqueConstraint, CheckConstraint, func, text,
 )
 from sqlalchemy.orm import declarative_base, relationship
@@ -30,6 +30,7 @@ class ConsultationStatus(enum.Enum):
 class MessageSender(enum.Enum):
     USER = "user"
     VET = "vet"
+    AI = "ai"  # server-generated AI assist summaries (Feature 3)
 
 class ActivitySource(enum.Enum):
     PHONE = "phone"
@@ -78,6 +79,7 @@ class Pet(Base):
     gender = Column(String, nullable=True)
     date_of_birth = Column(Date, nullable=True)
     weight_kg = Column(Numeric(5, 2), nullable=True)
+    blood_type = Column(String, nullable=True)  # A | B | AB | O
     avatar_uri = Column(String, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -88,6 +90,7 @@ class Pet(Base):
     consultations = relationship("Consultation", back_populates="pet", cascade="all, delete-orphan")
     vaccinations = relationship("Vaccination", back_populates="pet", cascade="all, delete-orphan")
     missions = relationship("DailyMission", back_populates="pet", cascade="all, delete-orphan")
+    devices = relationship("Device", back_populates="pet", cascade="all, delete-orphan")
 
 
 # ==========================================
@@ -102,9 +105,18 @@ class HealthAssessment(Base):
     image_uri = Column(String, nullable=True)
     risk_level = Column(RiskLevelType, nullable=True)
     ai_raw_response = Column(Text, nullable=True)
+    status = Column(String(20), nullable=False, server_default=text("'completed'"))
+    error_code = Column(String(50), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     pet = relationship("Pet", back_populates="assessments")
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('completed', 'failed')",
+            name="health_assessments_valid_status",
+        ),
+    )
 
 
 # ==========================================
@@ -140,6 +152,8 @@ class Consultation(Base):
     pet_id = Column(BigInteger, ForeignKey("pet_profiles.id", ondelete="CASCADE"), nullable=False, index=True)
     vet_id = Column(BigInteger, ForeignKey("veterinarians.id", ondelete="CASCADE"), nullable=False, index=True)
     status = Column(ConsultationStatusType, nullable=False, server_default=text("'PENDING'"))
+    # Optional link to the AI assessment being forwarded to the vet (UD-06).
+    assessment_id = Column(BigInteger, ForeignKey("health_assessments.id", ondelete="SET NULL"), nullable=True)
     notes = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -236,3 +250,27 @@ class Vaccination(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     pet = relationship("Pet", back_populates="vaccinations")
+
+
+# ==========================================
+# Feature 4 - Mode B: paired tracking devices (BLE/GPS collar)
+# ==========================================
+class Device(Base):
+    __tablename__ = "devices"
+
+    id = Column(BigInteger, primary_key=True)
+    pet_id = Column(BigInteger, ForeignKey("pet_profiles.id", ondelete="CASCADE"), nullable=False, index=True)
+    name = Column(String, nullable=False)                      # user-facing label
+    device_type = Column(String, nullable=False, server_default=text("'ble_collar'"))
+    identifier = Column(String, unique=True, nullable=False)   # MAC / serial
+    is_active = Column(Boolean, nullable=False, server_default=text("true"))
+    battery_percent = Column(Integer, nullable=True)
+    # Only the LATEST position is stored (live-map pin, SRS-F4-037/038).
+    # The raw route is never persisted - proposal privacy rule (see
+    # activity_logs note above); telemetry is aggregated on ingest.
+    last_lat = Column(Float, nullable=True)
+    last_lng = Column(Float, nullable=True)
+    last_seen_at = Column(DateTime(timezone=True), nullable=True)
+    paired_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    pet = relationship("Pet", back_populates="devices")

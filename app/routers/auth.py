@@ -45,12 +45,16 @@ def check_email_availability(email: str = Query(..., description="Email to check
 
 @router.post("/register", response_model=schemas.AuthResponse)
 def register(req: schemas.RegisterRequest, db: Session = Depends(get_db)):
-    existing = db.query(models.User).filter(models.User.email == req.email).first()
+    # Normalize like check-email does, so "Test@x.com" can't slip past the
+    # duplicate check that "test@x.com" would have caught.
+    email = req.email.lower().strip()
+
+    existing = db.query(models.User).filter(models.User.email == email).first()
     if existing:
         raise HTTPException(status_code=409, detail="Email already registered")
 
     try:
-        response = register_user(req.email, req.password)
+        response = register_user(email, req.password)
         supabase_uid = response.user.id
         access_token = response.session.access_token if response.session else ""
     except HTTPException:
@@ -59,7 +63,7 @@ def register(req: schemas.RegisterRequest, db: Session = Depends(get_db)):
         # The email already exists in Supabase Auth but has no public.users row
         # (e.g. a half-finished earlier signup). Recover by signing in instead of
         # 500-ing, so the account becomes usable.
-        login_resp = login_user(req.email, req.password)
+        login_resp = login_user(email, req.password)
         supabase_uid = login_resp.user.id
         access_token = login_resp.session.access_token
 
@@ -67,33 +71,60 @@ def register(req: schemas.RegisterRequest, db: Session = Depends(get_db)):
     # sign_in so the client always receives a usable token for the immediate
     # create-pet call that follows registration.
     if not access_token:
-        login_resp = login_user(req.email, req.password)
+        login_resp = login_user(email, req.password)
         access_token = login_resp.session.access_token
 
-    user = models.User(
-        supabase_uid=supabase_uid,
-        email=req.email,
-        name=req.name,
-    )
-    db.add(user)
-    db.commit()
-    db.refresh(user)
+    # Atomic write: user + pet land in the same DB transaction. If the pet
+    # insert fails (validation, FK, constraint, whatever) we rollback the user
+    # too, so the client never ends up "registered but no pet" — the exact
+    # half-state that drove the empty-state bug on Home.
+    created_pet: models.Pet | None = None
+    try:
+        user = models.User(
+            supabase_uid=supabase_uid,
+            email=email,
+            name=req.name,
+        )
+        db.add(user)
+        db.flush()  # assigns user.id without committing
+
+        if req.pet is not None:
+            pet = models.Pet(user_id=user.id, **req.pet.model_dump())
+            db.add(pet)
+            db.flush()  # surface any pet-side error inside the transaction
+            created_pet = pet
+
+        db.commit()
+        db.refresh(user)
+        if created_pet is not None:
+            db.refresh(created_pet)
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to create account: {exc}",
+        )
 
     return schemas.AuthResponse(
         access_token=access_token,
         user=schemas.UserResponse.model_validate(user),
+        pet=schemas.PetResponse.model_validate(created_pet) if created_pet else None,
     )
 
 
 @router.post("/login", response_model=schemas.AuthResponse)
 def login(req: schemas.LoginRequest, db: Session = Depends(get_db)):
-    response = login_user(req.email, req.password)
+    email = req.email.lower().strip()
+    response = login_user(email, req.password)
 
     supabase_uid = response.user.id
     user = db.query(models.User).filter(models.User.supabase_uid == supabase_uid).first()
 
     if not user:
-        user = db.query(models.User).filter(models.User.email == req.email).first()
+        user = db.query(models.User).filter(models.User.email == email).first()
         if user:
             user.supabase_uid = supabase_uid
             db.commit()
@@ -104,7 +135,7 @@ def login(req: schemas.LoginRequest, db: Session = Depends(get_db)):
             # so the account can log in instead of 404-ing.
             user = models.User(
                 supabase_uid=supabase_uid,
-                email=req.email,
+                email=email,
                 name=(response.user.user_metadata or {}).get("name"),
             )
             db.add(user)

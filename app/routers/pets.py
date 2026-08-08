@@ -4,7 +4,7 @@ from typing import List
 
 from app import models, schemas
 from app.database import get_db
-from app.auth import get_current_user
+from app.auth import get_current_user, require_owned_pet
 
 router = APIRouter(
     prefix="/api/v1",
@@ -26,38 +26,47 @@ def create_pet(
 
 
 @router.get("/pets", response_model=List[schemas.PetResponse])
-def get_all_pets(db: Session = Depends(get_db)):
-    """List all pets."""
-    pets = db.query(models.Pet).all()
-    return pets
+def get_my_pets(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """List the authenticated user's pets."""
+    return db.query(models.Pet).filter(models.Pet.user_id == current_user.id).all()
 
 
 @router.get("/pets/{pet_id}", response_model=schemas.PetResponse)
-def get_pet(pet_id: int, db: Session = Depends(get_db)):
-    """Get a single pet by ID."""
-    pet = db.query(models.Pet).filter(models.Pet.id == pet_id).first()
-    if not pet:
-        raise HTTPException(status_code=404, detail="Pet not found")
-    return pet
+def get_pet(
+    pet_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Get a single pet by ID (owner only)."""
+    return require_owned_pet(pet_id, current_user, db)
 
 
 @router.get("/users/{user_id}/pets", response_model=List[schemas.PetResponse])
-def get_user_pets(user_id: int, db: Session = Depends(get_db)):
-    """List all pets belonging to a user."""
-    user = db.query(models.User).filter(models.User.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+def get_user_pets(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """List all pets belonging to a user (only your own user id)."""
+    if user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Forbidden")
 
     pets = db.query(models.Pet).filter(models.Pet.user_id == user_id).all()
     return pets
 
 
 @router.put("/pets/{pet_id}", response_model=schemas.PetResponse)
-def update_pet(pet_id: int, pet_update: schemas.PetUpdate, db: Session = Depends(get_db)):
-    """Update a pet's profile."""
-    pet = db.query(models.Pet).filter(models.Pet.id == pet_id).first()
-    if not pet:
-        raise HTTPException(status_code=404, detail="Pet not found")
+def update_pet(
+    pet_id: int,
+    pet_update: schemas.PetUpdate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Update a pet's profile (owner only)."""
+    pet = require_owned_pet(pet_id, current_user, db)
 
     update_data = pet_update.model_dump(exclude_unset=True)
     for field, value in update_data.items():
@@ -69,11 +78,13 @@ def update_pet(pet_id: int, pet_update: schemas.PetUpdate, db: Session = Depends
 
 
 @router.delete("/pets/{pet_id}")
-def delete_pet(pet_id: int, db: Session = Depends(get_db)):
-    """Delete a pet."""
-    pet = db.query(models.Pet).filter(models.Pet.id == pet_id).first()
-    if not pet:
-        raise HTTPException(status_code=404, detail="Pet not found")
+def delete_pet(
+    pet_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Delete a pet (owner only)."""
+    pet = require_owned_pet(pet_id, current_user, db)
 
     db.delete(pet)
     db.commit()

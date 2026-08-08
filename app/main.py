@@ -8,6 +8,7 @@ from app import models
 
 from app.routers import (
     auth, vaccinations, assessments, pets, activities, stats, missions, consultations,
+    history, devices,
 )
 
 app = FastAPI(title="Petto API", version="1.0.0")
@@ -30,13 +31,16 @@ app.add_middleware(
 
 @app.exception_handler(Exception)
 async def cors_safe_exception_handler(request: Request, exc: Exception):
+    # Log the real error server-side; clients get a generic message so we
+    # don't leak internals (SQL, file paths, upstream API errors).
+    import logging
+    logging.getLogger("petto").exception("Unhandled error on %s %s", request.method, request.url.path)
     origin = request.headers.get("origin", "*")
     return JSONResponse(
         status_code=500,
-        content={"detail": f"Internal Server Error: {type(exc).__name__}: {exc}"},
+        content={"detail": "Internal Server Error"},
         headers={
             "Access-Control-Allow-Origin": origin,
-            "Access-Control-Allow-Credentials": "true",
             "Vary": "Origin",
         },
     )
@@ -49,6 +53,8 @@ app.include_router(activities.router)
 app.include_router(missions.router)
 app.include_router(consultations.router)
 app.include_router(stats.router)
+app.include_router(history.router)
+app.include_router(devices.router)
 
 @app.get("/", tags=["System"])
 def read_root():
@@ -64,6 +70,11 @@ def health_check():
 
 @app.get("/api/v1/setup-mock-data", tags=["System"])
 def setup_mock_data(db: Session = Depends(get_db)):
+    # Dev-only seeding helper. Disabled unless explicitly enabled, so the
+    # public production API can't be used to write mock rows.
+    if os.getenv("ENABLE_MOCK_DATA", "").lower() not in ("1", "true", "yes"):
+        return JSONResponse(status_code=404, content={"detail": "Not Found"})
+
     user = db.query(models.User).first()
     if not user:
         user = models.User(email="test@petto.com", name="Test Owner", password_hash="fake_hash")

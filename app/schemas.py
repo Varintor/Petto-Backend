@@ -11,6 +11,11 @@ class RegisterRequest(BaseModel):
     email: str
     password: str
     name: str
+    # When the onboarding screen collects pet info up-front it sends it here so
+    # the backend can create the user + pet in a single DB transaction. If the
+    # pet insert fails the user insert is rolled back too — guarantees the app
+    # never sees "registered but no pet" half-states.
+    pet: Optional["PetCreate"] = None
 
 class LoginRequest(BaseModel):
     email: str
@@ -29,6 +34,8 @@ class AuthResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     user: UserResponse
+    # Populated when the register call also created a pet atomically.
+    pet: Optional["PetResponse"] = None
 
 # ==========================================
 # Feature 2: Health Assessment
@@ -39,8 +46,10 @@ class AssessmentResponse(BaseModel):
     pet_id: int
     symptom_description: str
     image_uri: Optional[str] = None
-    risk_level: RiskLevel
+    risk_level: Optional[RiskLevel] = None
     ai_raw_response: Optional[str] = None
+    status: str
+    error_code: Optional[str] = None
     created_at: datetime
 
     class Config:
@@ -57,6 +66,7 @@ class PetCreate(BaseModel):
     gender: Optional[str] = None
     date_of_birth: Optional[date] = None
     weight_kg: Optional[float] = None
+    blood_type: Optional[str] = None
     avatar_uri: Optional[str] = None
 
 class PetUpdate(BaseModel):
@@ -66,6 +76,7 @@ class PetUpdate(BaseModel):
     gender: Optional[str] = None
     date_of_birth: Optional[date] = None
     weight_kg: Optional[float] = None
+    blood_type: Optional[str] = None
     avatar_uri: Optional[str] = None
 
 class PetResponse(BaseModel):
@@ -77,12 +88,20 @@ class PetResponse(BaseModel):
     gender: Optional[str] = None
     date_of_birth: Optional[date] = None
     weight_kg: Optional[float] = None
+    blood_type: Optional[str] = None
     avatar_uri: Optional[str] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
+
+
+# Resolve the forward references that RegisterRequest / AuthResponse hold to
+# PetCreate / PetResponse (declared after them so the Auth section stays at
+# the top of the file).
+RegisterRequest.model_rebuild()
+AuthResponse.model_rebuild()
 
 # ==========================================
 # Vaccinations
