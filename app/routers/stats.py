@@ -1,12 +1,13 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from sqlalchemy import func, and_
-from datetime import datetime, timedelta
+from sqlalchemy import func
+from datetime import date, datetime, timedelta
 from typing import Dict, Any
 from pydantic import BaseModel
 
 from app import models
 from app.database import get_db
+from app.auth import get_current_user, require_owned_pet
 from app.utils.time import now_bkk, today_bkk
 
 router = APIRouter(
@@ -47,11 +48,13 @@ class HealthScoreBreakdown(BaseModel):
 # ==========================================
 
 @router.get("/pets/{pet_id}/stats/dashboard", response_model=DashboardStatsResponse)
-def get_dashboard_stats(pet_id: int, db: Session = Depends(get_db)):
-    """Aggregated dashboard statistics for a pet."""
-    pet = db.query(models.Pet).filter(models.Pet.id == pet_id).first()
-    if not pet:
-        raise HTTPException(status_code=404, detail="Pet not found")
+def get_dashboard_stats(
+    pet_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Aggregated dashboard statistics for a pet (owner only)."""
+    pet = require_owned_pet(pet_id, current_user, db)
 
     health_score = _calculate_health_score(pet_id, db)
 
@@ -67,7 +70,9 @@ def get_dashboard_stats(pet_id: int, db: Session = Depends(get_db)):
     ).first()
 
     last_assessment = db.query(models.HealthAssessment).filter(
-        models.HealthAssessment.pet_id == pet_id
+        models.HealthAssessment.pet_id == pet_id,
+        models.HealthAssessment.status == "completed",
+        models.HealthAssessment.risk_level.isnot(None),
     ).order_by(models.HealthAssessment.created_at.desc()).first()
 
     assessment_data = None
@@ -84,14 +89,14 @@ def get_dashboard_stats(pet_id: int, db: Session = Depends(get_db)):
 
     vaccinations = db.query(models.Vaccination).filter(
         models.Vaccination.pet_id == pet_id
-    ).order_by(models.Vaccination.next_due_date.desc()).all()
+    ).order_by(models.Vaccination.date_administered.desc()).all()
 
     vaccination_status, next_vac_date = _get_vaccination_status(vaccinations)
 
-    missions_this_week = db.query(func.count(models.ActivityLog.id)).filter(
-        models.ActivityLog.pet_id == pet_id,
-        models.ActivityLog.is_mission_completed == True,
-        models.ActivityLog.created_at >= now_bkk() - timedelta(days=7)
+    missions_this_week = db.query(func.count(models.DailyMission.id)).filter(
+        models.DailyMission.pet_id == pet_id,
+        models.DailyMission.is_completed.is_(True),
+        models.DailyMission.completed_at >= now_bkk() - timedelta(days=7)
     ).scalar() or 0
 
     mission_streak = _calculate_mission_streak(pet_id, db)
@@ -111,11 +116,13 @@ def get_dashboard_stats(pet_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/pets/{pet_id}/stats/health-score", response_model=HealthScoreBreakdown)
-def get_health_score_breakdown(pet_id: int, db: Session = Depends(get_db)):
-    """Health score breakdown by category."""
-    pet = db.query(models.Pet).filter(models.Pet.id == pet_id).first()
-    if not pet:
-        raise HTTPException(status_code=404, detail="Pet not found")
+def get_health_score_breakdown(
+    pet_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Health score breakdown by category (owner only)."""
+    require_owned_pet(pet_id, current_user, db)
 
     activity_score = _calculate_activity_score(pet_id, db)
     assessment_score = _calculate_assessment_score(pet_id, db)
@@ -136,11 +143,14 @@ def get_health_score_breakdown(pet_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/pets/{pet_id}/stats/trends")
-def get_health_trends(pet_id: int, days: int = 30, db: Session = Depends(get_db)):
-    """Health trends over the last N days (for dashboard charts)."""
-    pet = db.query(models.Pet).filter(models.Pet.id == pet_id).first()
-    if not pet:
-        raise HTTPException(status_code=404, detail="Pet not found")
+def get_health_trends(
+    pet_id: int,
+    days: int = 30,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Health trends over the last N days (owner only)."""
+    require_owned_pet(pet_id, current_user, db)
 
     start_date = now_bkk() - timedelta(days=days)
 
@@ -161,6 +171,8 @@ def get_health_trends(pet_id: int, days: int = 30, db: Session = Depends(get_db)
         models.HealthAssessment.risk_level
     ).filter(
         models.HealthAssessment.pet_id == pet_id,
+        models.HealthAssessment.status == "completed",
+        models.HealthAssessment.risk_level.isnot(None),
         models.HealthAssessment.created_at >= start_date
     ).all()
 
@@ -206,7 +218,8 @@ def _calculate_activity_score(pet_id: int, db: Session) -> int:
 
     activities = db.query(
         func.sum(models.ActivityLog.duration_minutes).label('total_duration'),
-        func.count(models.ActivityLog.id).label('count')
+        func.count(models.ActivityLog.id).label('count'),
+        func.count(func.distinct(func.date(models.ActivityLog.created_at))).label('active_days'),
     ).filter(
         models.ActivityLog.pet_id == pet_id,
         models.ActivityLog.created_at >= week_ago
@@ -215,7 +228,7 @@ def _calculate_activity_score(pet_id: int, db: Session) -> int:
     total_minutes = float(activities.total_duration or 0)
     activity_count = activities.count or 0
 
-    active_days = min(activity_count, 7)
+    active_days = min(activities.active_days or 0, 7)
     base_score = (active_days / 7) * 60
 
     if activity_count > 0:
@@ -230,7 +243,9 @@ def _calculate_activity_score(pet_id: int, db: Session) -> int:
 
 def _calculate_assessment_score(pet_id: int, db: Session) -> int:
     last_assessment = db.query(models.HealthAssessment).filter(
-        models.HealthAssessment.pet_id == pet_id
+        models.HealthAssessment.pet_id == pet_id,
+        models.HealthAssessment.status == "completed",
+        models.HealthAssessment.risk_level.isnot(None),
     ).order_by(models.HealthAssessment.created_at.desc()).first()
 
     if not last_assessment:
@@ -261,12 +276,12 @@ def _calculate_vaccination_score(pet_id: int, db: Session) -> int:
     if not vaccinations:
         return 50
 
-    last_vac = vaccinations[0]
-
-    if not last_vac.next_due_date:
+    current_records = _latest_vaccinations_by_name(vaccinations)
+    due_dates = [v.next_due_date for v in current_records if v.next_due_date]
+    if not due_dates:
         return 100
 
-    days_until_due = (last_vac.next_due_date - today_bkk()).days
+    days_until_due = (min(due_dates) - today_bkk()).days
 
     if days_until_due < 0:
         return 20
@@ -278,47 +293,49 @@ def _calculate_vaccination_score(pet_id: int, db: Session) -> int:
         return 100
 
 
-def _get_vaccination_status(vaccinations: list) -> tuple[str, datetime | None]:
+def _latest_vaccinations_by_name(vaccinations: list) -> list:
+    """Keep only the newest dose for each vaccine name."""
+    latest = {}
+    for vaccination in sorted(
+        vaccinations, key=lambda item: item.date_administered, reverse=True
+    ):
+        key = vaccination.vaccine_name.strip().casefold()
+        latest.setdefault(key, vaccination)
+    return list(latest.values())
+
+
+def _get_vaccination_status(vaccinations: list) -> tuple[str, date | None]:
     if not vaccinations:
         return "no_records", None
 
-    last_vac = vaccinations[0]
-
-    if not last_vac.next_due_date:
+    current_records = _latest_vaccinations_by_name(vaccinations)
+    due_dates = [v.next_due_date for v in current_records if v.next_due_date]
+    if not due_dates:
         return "up_to_date", None
 
-    days_until = (last_vac.next_due_date - today_bkk()).days
+    next_due_date = min(due_dates)
+    days_until = (next_due_date - today_bkk()).days
 
     if days_until < 0:
-        return "overdue", last_vac.next_due_date
+        return "overdue", next_due_date
     elif days_until <= 7:
-        return "due_soon", last_vac.next_due_date
+        return "due_soon", next_due_date
     else:
-        return "up_to_date", last_vac.next_due_date
+        return "up_to_date", next_due_date
 
 
 def _calculate_mission_streak(pet_id: int, db: Session) -> int:
+    completed_dates = {
+        row[0]
+        for row in db.query(models.DailyMission.mission_date).filter(
+            models.DailyMission.pet_id == pet_id,
+            models.DailyMission.is_completed.is_(True),
+        ).distinct().order_by(models.DailyMission.mission_date.desc()).limit(366)
+    }
+
     streak = 0
     current_date = today_bkk()
-
-    while True:
-        day_start = datetime.combine(current_date, datetime.min.time(), tzinfo=now_bkk().tzinfo)
-        day_end = datetime.combine(current_date, datetime.max.time(), tzinfo=now_bkk().tzinfo)
-
-        activity = db.query(models.ActivityLog).filter(
-            models.ActivityLog.pet_id == pet_id,
-            models.ActivityLog.is_mission_completed == True,
-            models.ActivityLog.created_at >= day_start,
-            models.ActivityLog.created_at <= day_end
-        ).first()
-
-        if activity:
-            streak += 1
-            current_date -= timedelta(days=1)
-        else:
-            break
-
-        if streak > 365:
-            break
-
+    while current_date in completed_dates and streak < 366:
+        streak += 1
+        current_date -= timedelta(days=1)
     return streak
