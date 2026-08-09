@@ -1,4 +1,6 @@
 import os
+from dataclasses import dataclass
+
 from fastapi import Depends, HTTPException
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
@@ -13,6 +15,14 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
 
 bearer_scheme = HTTPBearer()
+
+
+@dataclass(frozen=True)
+class SupabaseAuthContext:
+    """Verified Supabase identity plus the JWT needed by downstream RLS."""
+
+    supabase_uid: str
+    access_token: str
 
 
 def register_user(email: str, password: str):
@@ -32,14 +42,14 @@ def login_user(email: str, password: str):
     return response
 
 
-def get_supabase_uid(
+def get_supabase_auth_context(
     credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
-) -> str:
-    """Validate the Bearer token with Supabase and return the auth uid.
+) -> SupabaseAuthContext:
+    """Validate the Bearer token and retain it for user-scoped integrations.
 
-    Split out from get_current_user so slow endpoints (e.g. assessments) can
-    verify the caller without holding a pooled DB connection for the whole
-    request — they map uid -> user inside their own short-lived session.
+    The access token is never logged or returned to clients. Assessment uploads
+    pass it to Supabase Storage so Storage RLS sees the same authenticated user
+    that the API has already verified.
     """
     token = credentials.credentials
 
@@ -51,7 +61,18 @@ def get_supabase_uid(
     if not response or not response.user:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
-    return response.user.id
+    return SupabaseAuthContext(
+        supabase_uid=response.user.id,
+        access_token=token,
+    )
+
+
+def get_supabase_uid(
+    auth_context: SupabaseAuthContext = Depends(get_supabase_auth_context),
+) -> str:
+    """Return the verified uid without exposing the caller's access token."""
+
+    return auth_context.supabase_uid
 
 
 def get_current_user(

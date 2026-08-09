@@ -32,7 +32,12 @@ def _bigint_as_integer(type_, compiler, **kw):  # noqa: ANN001
 
 from app import models                                # noqa: E402
 from app.database import get_db, get_session_factory  # noqa: E402
-from app.auth import get_current_user, get_supabase_uid  # noqa: E402
+from app.auth import (  # noqa: E402
+    SupabaseAuthContext,
+    get_current_user,
+    get_supabase_auth_context,
+    get_supabase_uid,
+)
 from app.main import app                               # noqa: E402
 
 engine = create_engine(
@@ -90,9 +95,13 @@ def pet(db, user):
 def auth_client(client, user):
     """A client whose get_current_user resolves to the seeded `user`."""
     app.dependency_overrides[get_current_user] = lambda: user
-    # Assessments authenticate via the raw uid (no DB in the dependency);
-    # resolve it to the seeded user's supabase uid.
+    app.dependency_overrides[get_supabase_auth_context] = lambda: SupabaseAuthContext(
+        supabase_uid=user.supabase_uid,
+        access_token="test-access-token",
+    )
+    # Other authenticated routes still consume the uid-only dependency.
     app.dependency_overrides[get_supabase_uid] = lambda: user.supabase_uid
     yield client
     app.dependency_overrides.pop(get_current_user, None)
+    app.dependency_overrides.pop(get_supabase_auth_context, None)
     app.dependency_overrides.pop(get_supabase_uid, None)

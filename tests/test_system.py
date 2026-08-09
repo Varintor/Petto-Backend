@@ -36,8 +36,8 @@ def test_ready_returns_200_when_database_and_revision_are_current(client, monkey
             ready=True,
             database="available",
             migration="current",
-            current_revisions=("0004_assessment_failure_status",),
-            expected_revisions=("0004_assessment_failure_status",),
+            current_revisions=("0005_storage_owner_rls",),
+            expected_revisions=("0005_storage_owner_rls",),
         ),
     )
 
@@ -56,7 +56,7 @@ def test_ready_returns_503_for_migration_mismatch(client, monkeypatch):
             database="available",
             migration="out_of_date",
             current_revisions=("0001_baseline_schema",),
-            expected_revisions=("0004_assessment_failure_status",),
+            expected_revisions=("0005_storage_owner_rls",),
             reason="migration_mismatch",
         ),
     )
@@ -93,4 +93,4 @@ def test_production_rejects_wildcard_cors():
 
 
 def test_repository_expected_revision_is_current_head():
-    assert expected_database_revisions() == ("0004_assessment_failure_status",)
+    assert expected_database_revisions() == ("0005_storage_owner_rls",)

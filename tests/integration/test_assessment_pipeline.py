@@ -9,11 +9,14 @@ from app import models
 @pytest.fixture
 def mock_external_apis(monkeypatch):
     """Mocks Supabase and Gemini APIs."""
-    mock_supabase = MagicMock()
-    mock_storage = MagicMock()
-    mock_supabase.storage.from_.return_value = mock_storage
-    mock_storage.get_public_url.return_value = "https://mock-supabase.com/image.jpg"
-    monkeypatch.setattr("app.routers.assessments.supabase", mock_supabase)
+    mock_storage_client = MagicMock()
+    mock_bucket = MagicMock()
+    mock_storage_client.from_.return_value = mock_bucket
+    mock_bucket.get_public_url.return_value = "https://mock-supabase.com/image.jpg"
+    monkeypatch.setattr(
+        "app.routers.assessments.create_user_storage_client",
+        lambda access_token: mock_storage_client,
+    )
 
     mock_gemini = MagicMock()
     mock_gemini_resp = MagicMock()
@@ -21,11 +24,7 @@ def mock_external_apis(monkeypatch):
     mock_gemini.models.generate_content.return_value = mock_gemini_resp
     monkeypatch.setattr("app.routers.assessments.gemini_client", mock_gemini)
     
-    # We also need to mock `get_supabase_uid` to bypass auth, 
-    # but conftest's auth_client does not override it for Form data unless we use auth_client properly.
-    # Actually, conftest overrides it to return `user.supabase_uid`.
-
-    return mock_storage, mock_gemini
+    return mock_bucket, mock_gemini
 
 
 def test_assessment_e2e_success(auth_client, pet, mock_external_apis, db):

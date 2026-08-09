@@ -1,25 +1,29 @@
 import asyncio
 import logging
 import os
-import uuid
 from typing import List
 from fastapi import APIRouter, Depends, File, UploadFile, Form, HTTPException
 from sqlalchemy.orm import Session
-from supabase import create_client, Client
 from google import genai
 
 from app import models, schemas
-from app.auth import get_current_user, get_supabase_uid, require_owned_pet
+from app.auth import (
+    SupabaseAuthContext,
+    get_current_user,
+    get_supabase_auth_context,
+    require_owned_pet,
+)
 from app.database import get_db, get_session_factory
+from app.storage import (
+    StorageConfigurationError,
+    assessment_object_path,
+    create_user_storage_client,
+)
 
 router = APIRouter(
     prefix="/api/v1",
     tags=["Health Assessments"],
 )
-
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
@@ -115,20 +119,21 @@ async def create_assessment(
     pet_id: int = Form(...),
     symptom_description: str = Form(...),
     image: UploadFile = File(...),
-    supabase_uid: str = Depends(get_supabase_uid),
+    auth_context: SupabaseAuthContext = Depends(get_supabase_auth_context),
     session_factory=Depends(get_session_factory),
 ):
     # No Depends(get_db) here — Supabase upload + Gemini take 5-30s and would
     # otherwise hold a pooled DB connection idle that whole time, draining the
-    # pool under concurrent load. Auth uses get_supabase_uid (token check only,
-    # no DB); user lookup + pet ownership run in a short-lived session below.
+    # pool under concurrent load. Auth uses get_supabase_auth_context (token
+    # check only, no DB); user lookup + pet ownership run in a short-lived
+    # session below.
     if not (image.content_type or "").startswith("image/"):
         raise HTTPException(status_code=400, detail="File must be an image")
 
     # Ownership check up-front, then release the connection before slow work.
     with session_factory() as db:
         current_user = db.query(models.User).filter(
-            models.User.supabase_uid == supabase_uid
+            models.User.supabase_uid == auth_context.supabase_uid
         ).first()
         if not current_user:
             raise HTTPException(status_code=401, detail="User not found")
@@ -146,11 +151,17 @@ async def create_assessment(
                 detail="Unsupported or invalid image. Use JPEG, PNG, or WebP.",
             )
         mime_type, extension = validated_type
-        unique_filename = f"{pet_id}_{uuid.uuid4().hex}{extension}"
+        unique_filename = assessment_object_path(
+            auth_context.supabase_uid,
+            pet_id,
+            extension,
+        )
 
-        if supabase is None:
+        try:
+            storage_client = create_user_storage_client(auth_context.access_token)
+        except StorageConfigurationError:
             raise HTTPException(status_code=503, detail="Image storage is unavailable")
-        bucket = supabase.storage.from_("pet-images")
+        bucket = storage_client.from_("pet-images")
         await _run_blocking(
             lambda: bucket.upload(
                 path=unique_filename,

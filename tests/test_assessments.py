@@ -3,25 +3,38 @@
 
 
 class _FakeBucket:
+    def __init__(self):
+        self.uploaded_path = None
+
     def upload(self, path, file, file_options):
+        self.uploaded_path = path
         return None
 
     def get_public_url(self, path):
         return f"https://images.test/{path}"
 
 
-class _FakeStorage:
+class _FakeStorageClient:
+    def __init__(self):
+        self.bucket = _FakeBucket()
+
     def from_(self, name):
-        return _FakeBucket()
-
-
-class _FakeSupabase:
-    storage = _FakeStorage()
+        assert name == "pet-images"
+        return self.bucket
 
 
 def test_assessment_ai_unavailable_is_recorded_as_failed(auth_client, pet, monkeypatch):
     # Gemini disabled -> explicit retryable failure; Supabase storage mocked.
-    monkeypatch.setattr("app.routers.assessments.supabase", _FakeSupabase())
+    storage_client = _FakeStorageClient()
+
+    def user_storage_client(access_token):
+        assert access_token == "test-access-token"
+        return storage_client
+
+    monkeypatch.setattr(
+        "app.routers.assessments.create_user_storage_client",
+        user_storage_client,
+    )
     monkeypatch.setattr("app.routers.assessments.gemini_client", None)
 
     r = auth_client.post(
@@ -36,6 +49,10 @@ def test_assessment_ai_unavailable_is_recorded_as_failed(auth_client, pet, monke
     assert data["ai_raw_response"] is None
     assert data["error_code"] == "AI_SERVICE_UNAVAILABLE"
     assert data["pet_id"] == pet.id
+    assert storage_client.bucket.uploaded_path.startswith(
+        f"uid-owner/{pet.id}/"
+    )
+    assert storage_client.bucket.uploaded_path.endswith(".jpg")
 
 
 def test_assessment_rejects_non_image(auth_client, pet):
