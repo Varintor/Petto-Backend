@@ -9,7 +9,7 @@ from app.readiness import check_readiness
 
 from app.routers import (
     auth, vaccinations, assessments, pets, activities, stats, missions, consultations,
-    history, devices,
+    history, devices, calendar, wardrobe,
 )
 
 app = FastAPI(title="Petto API", version="1.0.0")
@@ -56,6 +56,8 @@ app.include_router(consultations.router)
 app.include_router(stats.router)
 app.include_router(history.router)
 app.include_router(devices.router)
+app.include_router(calendar.router)
+app.include_router(wardrobe.router)
 
 @app.get("/", tags=["System"])
 def read_root():

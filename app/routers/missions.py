@@ -194,6 +194,18 @@ def complete_mission(
 
     mission.is_completed = is_completed
     mission.completed_at = now_bkk() if is_completed else None
+    if is_completed:
+        # Rewards are append-only: undoing a mission does not remove an item
+        # the owner has already earned. The unique key makes retries safe.
+        accessory_id = f"mission-{mission.id}"
+        exists = db.query(models.PetWardrobeItem).filter_by(
+            pet_id=mission.pet_id, accessory_id=accessory_id
+        ).first()
+        if not exists:
+            db.add(models.PetWardrobeItem(
+                pet_id=mission.pet_id,
+                accessory_id=accessory_id,
+            ))
     db.commit()
     db.refresh(mission)
     return mission
