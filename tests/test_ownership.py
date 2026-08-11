@@ -8,7 +8,12 @@ Non-owned resources return the same 404 as missing ones so ids don't leak.
 import pytest
 
 from app import models
-from app.auth import get_current_user, get_supabase_uid
+from app.auth import (
+    SupabaseAuthContext,
+    get_current_user,
+    get_supabase_auth_context,
+    get_supabase_uid,
+)
 from app.main import app
 
 
@@ -25,9 +30,14 @@ def intruder(db):
 def intruder_client(client, intruder):
     """A client authenticated as a DIFFERENT user than the `pet` owner."""
     app.dependency_overrides[get_current_user] = lambda: intruder
+    app.dependency_overrides[get_supabase_auth_context] = lambda: SupabaseAuthContext(
+        supabase_uid=intruder.supabase_uid,
+        access_token="intruder-test-token",
+    )
     app.dependency_overrides[get_supabase_uid] = lambda: intruder.supabase_uid
     yield client
     app.dependency_overrides.pop(get_current_user, None)
+    app.dependency_overrides.pop(get_supabase_auth_context, None)
     app.dependency_overrides.pop(get_supabase_uid, None)
 
 

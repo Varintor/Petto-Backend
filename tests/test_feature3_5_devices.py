@@ -11,7 +11,10 @@ from app.utils.time import now_bkk
 
 @pytest.fixture()
 def vet(db):
-    v = models.Veterinarian(email="vet@test.com", name="Dr. Vet", is_online=True)
+    v = models.Veterinarian(
+        email="vet@test.com", name="Dr. Vet", is_online=True,
+        verification_status="approved", is_accepting_consultations=True,
+    )
     db.add(v)
     db.commit()
     db.refresh(v)

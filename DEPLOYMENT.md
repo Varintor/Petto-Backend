@@ -10,7 +10,7 @@ Railway uses `python -m app.predeploy` before releasing a deployment. The comman
 | `DATABASE_URL` | required | required | Runtime DB connection; transaction pooler is allowed |
 | `MIGRATION_DATABASE_URL` | required | required | Direct or session-pooler DB URL; do not use port `6543` |
 | `SUPABASE_URL` | required | required | Environment-specific Supabase API URL |
-| `SUPABASE_KEY` | required | required | Environment-specific non-secret/publishable client key until the private Storage migration is implemented |
+| `SUPABASE_KEY` | required | required | Environment-specific publishable key used with each verified user JWT for private Storage RLS |
 | `GEMINI_API_KEY` | required | required | AI assessment provider credential |
 | `ALLOWED_ORIGINS` | recommended | required | Comma-separated frontend origins; wildcard is rejected in production |
 | `ENABLE_MOCK_DATA` | `false` | `false` | Public mock-data route must remain disabled |
