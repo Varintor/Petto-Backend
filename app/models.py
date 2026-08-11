@@ -1,9 +1,11 @@
 from sqlalchemy import (
     Column, BigInteger, Integer, String, DateTime, Date, ForeignKey, Enum, Text,
-    Float, Boolean, Numeric, UniqueConstraint, CheckConstraint, func, text,
+    Float, Boolean, Numeric, UniqueConstraint, CheckConstraint, Index, JSON, Uuid,
+    func, text,
 )
 from sqlalchemy.orm import declarative_base, relationship
 import enum
+import uuid
 
 Base = declarative_base()
 
@@ -57,8 +59,8 @@ class User(Base):
     __tablename__ = "users"
 
     id = Column(BigInteger, primary_key=True)
-    supabase_uid = Column(String, unique=True, index=True, nullable=True)
-    email = Column(String, unique=True, index=True, nullable=False)
+    supabase_uid = Column(String, unique=True, nullable=True)
+    email = Column(String, unique=True, nullable=False)
     password_hash = Column(String, nullable=True)
     name = Column(String, nullable=True)
     avatar_uri = Column(String, nullable=True)
@@ -91,6 +93,12 @@ class Pet(Base):
     vaccinations = relationship("Vaccination", back_populates="pet", cascade="all, delete-orphan")
     missions = relationship("DailyMission", back_populates="pet", cascade="all, delete-orphan")
     devices = relationship("Device", back_populates="pet", cascade="all, delete-orphan")
+    calendar_events = relationship("CalendarEvent", back_populates="pet", cascade="all, delete-orphan")
+    wardrobe_items = relationship("PetWardrobeItem", back_populates="pet", cascade="all, delete-orphan")
+    health_profile = relationship(
+        "PetHealthProfile", back_populates="pet", cascade="all, delete-orphan", uselist=False
+    )
+    appointments = relationship("Appointment", back_populates="pet", cascade="all, delete-orphan")
 
 
 # ==========================================
@@ -128,8 +136,8 @@ class Veterinarian(Base):
     id = Column(BigInteger, primary_key=True)
     # Bridges this row to Supabase Auth (matches users.supabase_uid behaviour).
     # Nullable so legacy rows created before the Supabase-Auth flow can exist.
-    supabase_uid = Column(String, unique=True, index=True, nullable=True)
-    email = Column(String, unique=True, index=True, nullable=False)
+    supabase_uid = Column(String, unique=True, nullable=True)
+    email = Column(String, unique=True, nullable=False)
     # Retained nullable for backwards-compatibility with rows that pre-date the
     # Supabase-Auth migration. New vet accounts authenticate via Supabase Auth
     # and leave this column NULL.
@@ -140,9 +148,83 @@ class Veterinarian(Base):
     specialty = Column(String, nullable=True)
     avatar_uri = Column(String, nullable=True)
     is_online = Column(Boolean, nullable=False, server_default=text("false"))
+    verification_status = Column(String(20), nullable=False, server_default=text("'pending'"))
+    is_accepting_consultations = Column(Boolean, nullable=False, server_default=text("false"))
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
 
     consultations = relationship("Consultation", back_populates="vet")
+    provider_links = relationship(
+        "ProviderVeterinarian", back_populates="veterinarian", cascade="all, delete-orphan"
+    )
+    proposed_appointments = relationship("Appointment", back_populates="proposed_by_vet")
+
+    __table_args__ = (
+        CheckConstraint(
+            "verification_status IN ('pending', 'approved', 'rejected', 'disabled')",
+            name="veterinarians_valid_verification_status",
+        ),
+    )
+
+
+class VeterinaryProvider(Base):
+    __tablename__ = "veterinary_providers"
+
+    id = Column(BigInteger, primary_key=True)
+    external_place_id = Column(String(255), unique=True, nullable=True)
+    name = Column(String(200), nullable=False)
+    provider_type = Column(String(30), nullable=False, server_default=text("'hospital'"))
+    address = Column(Text, nullable=True)
+    phone = Column(String(50), nullable=True)
+    latitude = Column(Numeric(9, 6), nullable=True)
+    longitude = Column(Numeric(9, 6), nullable=True)
+    operating_hours = Column(JSON, nullable=True)
+    provider_status = Column(String(20), nullable=False, server_default=text("'listed'"))
+    consultation_enabled = Column(Boolean, nullable=False, server_default=text("false"))
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    veterinarian_links = relationship(
+        "ProviderVeterinarian", back_populates="provider", cascade="all, delete-orphan"
+    )
+    consultations = relationship("Consultation", back_populates="provider")
+    appointments = relationship("Appointment", back_populates="provider")
+
+    __table_args__ = (
+        CheckConstraint(
+            "provider_type IN ('hospital', 'clinic', 'independent')",
+            name="veterinary_providers_valid_type",
+        ),
+        CheckConstraint(
+            "provider_status IN ('listed', 'partner', 'disabled')",
+            name="veterinary_providers_valid_status",
+        ),
+        CheckConstraint(
+            "latitude IS NULL OR latitude BETWEEN -90 AND 90",
+            name="veterinary_providers_valid_latitude",
+        ),
+        CheckConstraint(
+            "longitude IS NULL OR longitude BETWEEN -180 AND 180",
+            name="veterinary_providers_valid_longitude",
+        ),
+    )
+
+
+class ProviderVeterinarian(Base):
+    __tablename__ = "provider_veterinarians"
+
+    provider_id = Column(
+        BigInteger, ForeignKey("veterinary_providers.id", ondelete="CASCADE"), primary_key=True
+    )
+    veterinarian_id = Column(
+        BigInteger, ForeignKey("veterinarians.id", ondelete="CASCADE"), primary_key=True
+    )
+    is_active = Column(Boolean, nullable=False, server_default=text("true"))
+    accepting_consultations = Column(Boolean, nullable=False, server_default=text("false"))
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    provider = relationship("VeterinaryProvider", back_populates="veterinarian_links")
+    veterinarian = relationship("Veterinarian", back_populates="provider_links")
 
 
 class Consultation(Base):
@@ -151,16 +233,32 @@ class Consultation(Base):
     id = Column(BigInteger, primary_key=True)
     pet_id = Column(BigInteger, ForeignKey("pet_profiles.id", ondelete="CASCADE"), nullable=False, index=True)
     vet_id = Column(BigInteger, ForeignKey("veterinarians.id", ondelete="CASCADE"), nullable=False, index=True)
+    provider_id = Column(
+        BigInteger, ForeignKey("veterinary_providers.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     status = Column(ConsultationStatusType, nullable=False, server_default=text("'PENDING'"))
     # Optional link to the AI assessment being forwarded to the vet (UD-06).
-    assessment_id = Column(BigInteger, ForeignKey("health_assessments.id", ondelete="SET NULL"), nullable=True)
+    assessment_id = Column(
+        BigInteger, ForeignKey("health_assessments.id", ondelete="SET NULL"),
+        nullable=True, index=True,
+    )
+    subject = Column(String(200), nullable=True)
     notes = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now())
+    closed_at = Column(DateTime(timezone=True), nullable=True)
 
     pet = relationship("Pet", back_populates="consultations")
     vet = relationship("Veterinarian", back_populates="consultations")
+    provider = relationship("VeterinaryProvider", back_populates="consultations")
     messages = relationship("Message", back_populates="consultation", cascade="all, delete-orphan")
+    shared_assessments = relationship(
+        "ConsultationSharedAssessment", back_populates="consultation", cascade="all, delete-orphan"
+    )
+    appointments = relationship("Appointment", back_populates="consultation", cascade="all, delete-orphan")
+    shared_health_cards = relationship(
+        "ConsultationSharedHealthCard", back_populates="consultation", cascade="all, delete-orphan"
+    )
 
 
 class Message(Base):
@@ -173,12 +271,89 @@ class Message(Base):
     content = Column(Text, nullable=True)
     attachment_uri = Column(String, nullable=True)
     is_read = Column(Boolean, nullable=False, server_default=text("false"))
+    client_message_id = Column(Uuid(as_uuid=True), nullable=True, default=uuid.uuid4)
+    message_type = Column(String(20), nullable=False, server_default=text("'text'"))
+    delivered_at = Column(DateTime(timezone=True), nullable=True)
+    read_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     consultation = relationship("Consultation", back_populates="messages")
 
     __table_args__ = (
         CheckConstraint("content IS NOT NULL OR attachment_uri IS NOT NULL", name="messages_has_payload"),
+        CheckConstraint(
+            "message_type IN ('text', 'assessment', 'appointment', 'system', 'ai')",
+            name="messages_valid_message_type",
+        ),
+        UniqueConstraint(
+            "consultation_id", "client_message_id", name="uq_messages_consultation_client_id"
+        ),
+    )
+
+
+class ConsultationSharedAssessment(Base):
+    __tablename__ = "consultation_shared_assessments"
+
+    id = Column(BigInteger, primary_key=True)
+    consultation_id = Column(
+        BigInteger, ForeignKey("consultations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    assessment_id = Column(
+        BigInteger, ForeignKey("health_assessments.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    shared_by_user_id = Column(
+        BigInteger, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    shared_at = Column(DateTime(timezone=True), server_default=func.now())
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+
+    consultation = relationship("Consultation", back_populates="shared_assessments")
+    assessment = relationship("HealthAssessment")
+    shared_by = relationship("User")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "consultation_id", "assessment_id", name="uq_consultation_shared_assessment"
+        ),
+    )
+
+
+class Appointment(Base):
+    __tablename__ = "appointments"
+
+    id = Column(BigInteger, primary_key=True)
+    consultation_id = Column(
+        BigInteger, ForeignKey("consultations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    pet_id = Column(BigInteger, ForeignKey("pet_profiles.id", ondelete="CASCADE"), nullable=False, index=True)
+    provider_id = Column(
+        BigInteger, ForeignKey("veterinary_providers.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    proposed_by_vet_id = Column(
+        BigInteger, ForeignKey("veterinarians.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    starts_at = Column(DateTime(timezone=True), nullable=False)
+    ends_at = Column(DateTime(timezone=True), nullable=True)
+    reason = Column(Text, nullable=True)
+    status = Column(String(20), nullable=False, server_default=text("'proposed'"))
+    responded_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    consultation = relationship("Consultation", back_populates="appointments")
+    pet = relationship("Pet", back_populates="appointments")
+    provider = relationship("VeterinaryProvider", back_populates="appointments")
+    proposed_by_vet = relationship("Veterinarian", back_populates="proposed_appointments")
+    calendar_event = relationship(
+        "CalendarEvent", back_populates="appointment", uselist=False, cascade="all, delete-orphan"
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('proposed', 'accepted', 'declined', 'cancelled', 'completed')",
+            name="appointments_valid_status",
+        ),
+        CheckConstraint("ends_at IS NULL OR ends_at > starts_at", name="appointments_valid_time_range"),
     )
 
 
@@ -250,6 +425,99 @@ class Vaccination(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     pet = relationship("Pet", back_populates="vaccinations")
+
+
+class CalendarEvent(Base):
+    __tablename__ = "calendar_events"
+
+    id = Column(BigInteger, primary_key=True)
+    pet_id = Column(BigInteger, ForeignKey("pet_profiles.id", ondelete="CASCADE"), nullable=False, index=True)
+    title = Column(String(150), nullable=False)
+    event_type = Column(String(30), nullable=False)
+    event_date = Column(Date, nullable=False)
+    starts_at = Column(DateTime(timezone=True), nullable=True)
+    is_completed = Column(Boolean, nullable=False, server_default=text("false"))
+    reminder_minutes = Column(Integer, nullable=True, server_default=text("30"))
+    appointment_id = Column(
+        BigInteger,
+        ForeignKey("appointments.id", ondelete="CASCADE"),
+        nullable=True,
+        unique=True,
+    )
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    pet = relationship("Pet", back_populates="calendar_events")
+    appointment = relationship("Appointment", back_populates="calendar_event")
+
+    __table_args__ = (
+        CheckConstraint(
+            "event_type IN ('care', 'medication', 'vet', 'grooming', 'walk')",
+            name="calendar_events_valid_type",
+        ),
+        CheckConstraint(
+            "reminder_minutes IS NULL OR reminder_minutes BETWEEN 0 AND 10080",
+            name="calendar_events_valid_reminder",
+        ),
+    )
+
+
+class PetWardrobeItem(Base):
+    __tablename__ = "pet_wardrobe_items"
+
+    id = Column(BigInteger, primary_key=True)
+    pet_id = Column(BigInteger, ForeignKey("pet_profiles.id", ondelete="CASCADE"), nullable=False, index=True)
+    accessory_id = Column(String(64), nullable=False)
+    unlocked_at = Column(DateTime(timezone=True), server_default=func.now())
+    equipped_at = Column(DateTime(timezone=True), nullable=True)
+
+    pet = relationship("Pet", back_populates="wardrobe_items")
+
+    __table_args__ = (
+        UniqueConstraint("pet_id", "accessory_id", name="uq_pet_wardrobe_item"),
+        Index(
+            "uq_pet_wardrobe_one_equipped",
+            "pet_id",
+            unique=True,
+            postgresql_where=equipped_at.is_not(None),
+            sqlite_where=equipped_at.is_not(None),
+        ),
+    )
+
+
+class PetHealthProfile(Base):
+    __tablename__ = "pet_health_profiles"
+
+    pet_id = Column(
+        BigInteger, ForeignKey("pet_profiles.id", ondelete="CASCADE"), primary_key=True
+    )
+    allergies = Column(JSON, nullable=False, default=list)
+    chronic_conditions = Column(JSON, nullable=False, default=list)
+    current_medications = Column(JSON, nullable=False, default=list)
+    notes = Column(Text, nullable=True)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    pet = relationship("Pet", back_populates="health_profile")
+
+
+class ConsultationSharedHealthCard(Base):
+    __tablename__ = "consultation_shared_health_cards"
+
+    id = Column(BigInteger, primary_key=True)
+    consultation_id = Column(
+        BigInteger, ForeignKey("consultations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    pet_id = Column(BigInteger, ForeignKey("pet_profiles.id", ondelete="CASCADE"), nullable=False, index=True)
+    shared_by_user_id = Column(
+        BigInteger, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    snapshot = Column(JSON, nullable=False)
+    shared_at = Column(DateTime(timezone=True), server_default=func.now())
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+
+    consultation = relationship("Consultation", back_populates="shared_health_cards")
+    pet = relationship("Pet")
+    shared_by = relationship("User")
 
 
 # ==========================================
