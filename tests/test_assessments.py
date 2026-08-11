@@ -10,8 +10,8 @@ class _FakeBucket:
         self.uploaded_path = path
         return None
 
-    def get_public_url(self, path):
-        return f"https://images.test/{path}"
+    def create_signed_url(self, path, expires_in):
+        return {"signedURL": f"https://images.test/signed/{path}"}
 
 
 class _FakeStorageClient:

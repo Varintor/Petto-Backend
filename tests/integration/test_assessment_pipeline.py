@@ -12,7 +12,9 @@ def mock_external_apis(monkeypatch):
     mock_storage_client = MagicMock()
     mock_bucket = MagicMock()
     mock_storage_client.from_.return_value = mock_bucket
-    mock_bucket.get_public_url.return_value = "https://mock-supabase.com/image.jpg"
+    mock_bucket.create_signed_url.return_value = {
+        "signedURL": "https://mock-supabase.com/signed/image.jpg"
+    }
     monkeypatch.setattr(
         "app.routers.assessments.create_user_storage_client",
         lambda access_token: mock_storage_client,

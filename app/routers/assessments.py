@@ -17,6 +17,7 @@ from app.database import get_db, get_session_factory
 from app.storage import (
     StorageConfigurationError,
     assessment_object_path,
+    create_assessment_signed_url,
     create_user_storage_client,
 )
 
@@ -50,6 +51,17 @@ _IMAGE_SIGNATURES = (
 )
 
 
+def _assessment_response(assessment, access_token: str) -> schemas.AssessmentResponse:
+    payload = schemas.AssessmentResponse.model_validate(assessment)
+    if payload.image_uri:
+        try:
+            payload.image_uri = create_assessment_signed_url(access_token, payload.image_uri)
+        except Exception:
+            logger.exception("Could not sign assessment image id=%s", assessment.id)
+            payload.image_uri = None
+    return payload
+
+
 def _validated_image_type(data: bytes) -> tuple[str, str] | None:
     for mime_type, extension, matches in _IMAGE_SIGNATURES:
         if matches(data):
@@ -70,6 +82,7 @@ async def _run_blocking(callable_):
 def get_my_assessments(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
+    auth_context: SupabaseAuthContext = Depends(get_supabase_auth_context),
 ):
     """List all assessments across the caller's pets."""
     assessments = db.query(models.HealthAssessment).join(
@@ -77,7 +90,7 @@ def get_my_assessments(
     ).filter(
         models.Pet.user_id == current_user.id
     ).order_by(models.HealthAssessment.created_at.desc()).all()
-    return assessments
+    return [_assessment_response(a, auth_context.access_token) for a in assessments]
 
 
 @router.get("/assessments/{assessment_id}", response_model=schemas.AssessmentResponse)
@@ -85,13 +98,14 @@ def get_assessment(
     assessment_id: int,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
+    auth_context: SupabaseAuthContext = Depends(get_supabase_auth_context),
 ):
     """Get a single assessment by ID (owner only)."""
     assessment = db.query(models.HealthAssessment).filter(models.HealthAssessment.id == assessment_id).first()
     if not assessment:
         raise HTTPException(status_code=404, detail="Assessment not found")
     require_owned_pet(assessment.pet_id, current_user, db)
-    return assessment
+    return _assessment_response(assessment, auth_context.access_token)
 
 
 @router.get("/pets/{pet_id}/assessments", response_model=List[schemas.AssessmentResponse])
@@ -99,6 +113,7 @@ def get_pet_assessments(
     pet_id: int,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
+    auth_context: SupabaseAuthContext = Depends(get_supabase_auth_context),
 ):
     """List all assessments for a specific pet (owner only)."""
     require_owned_pet(pet_id, current_user, db)
@@ -107,7 +122,7 @@ def get_pet_assessments(
         models.HealthAssessment.pet_id == pet_id
     ).order_by(models.HealthAssessment.created_at.desc()).all()
 
-    return assessments
+    return [_assessment_response(a, auth_context.access_token) for a in assessments]
 
 
 # ==========================================
@@ -168,9 +183,6 @@ async def create_assessment(
                 file=file_bytes,
                 file_options={"content-type": mime_type},
             )
-        )
-        actual_image_uri = await _run_blocking(
-            lambda: bucket.get_public_url(unique_filename)
         )
     except HTTPException:
         raise
@@ -281,7 +293,9 @@ Risk: HIGH"""
         new_assessment = models.HealthAssessment(
             pet_id=pet_id,
             symptom_description=symptom_description,
-            image_uri=actual_image_uri,
+            # Persist a stable object key. API responses generate an RLS-checked,
+            # short-lived signed URL; a public URL must never be stored again.
+            image_uri=unique_filename,
             risk_level=ai_risk_level,
             ai_raw_response=ai_response_text,
             status=assessment_status,
@@ -293,4 +307,4 @@ Risk: HIGH"""
         # Detach so the caller can serialize the ORM object after the session
         # closes (FastAPI's response_model will read attributes off it).
         db.expunge(new_assessment)
-        return new_assessment
+        return _assessment_response(new_assessment, auth_context.access_token)

@@ -63,3 +63,15 @@ def test_assessment_object_path_is_owner_scoped_and_unique():
 
     assert re.fullmatch(r"user-uid/42/[0-9a-f]{32}\.png", first)
     assert first != second
+
+
+def test_storage_object_path_accepts_new_and_legacy_formats():
+    path = "user-uid/42/photo.png"
+    assert storage.storage_object_path(path) == path
+    assert storage.storage_object_path(
+        "https://project.supabase.co/storage/v1/object/public/pet-images/user-uid/42/photo.png"
+    ) == path
+
+
+def test_storage_object_path_rejects_unrelated_external_url():
+    assert storage.storage_object_path("https://example.com/photo.png") is None
