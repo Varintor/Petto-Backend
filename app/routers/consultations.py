@@ -1,180 +1,306 @@
+import math
 import os
-
-from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import JSONResponse
-from sqlalchemy.orm import Session
-from typing import List, Optional
+import uuid
 from datetime import datetime
-from pydantic import BaseModel
+from typing import Literal
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 
 from app import models
-from app.auth import get_current_user, require_owned_pet
+from app.auth import AuthenticatedActor, get_current_actor, get_current_user, require_owned_pet
 from app.database import get_db
 from app.utils.time import now_bkk
 
-router = APIRouter(
-    prefix="/api/v1",
-    tags=["Vet Consultation"],
-)
+router = APIRouter(prefix="/api/v1", tags=["Vet Consultation"])
 
 
-# ==========================================
-# Schemas
-# ==========================================
 class VetCreate(BaseModel):
     email: str
     name: str
     password_hash: str = "changeme"
-    clinic_name: Optional[str] = None
-    license_number: Optional[str] = None
-    specialty: Optional[str] = None
-    avatar_uri: Optional[str] = None
+    clinic_name: str | None = None
+    license_number: str | None = None
+    specialty: str | None = None
+    avatar_uri: str | None = None
     is_online: bool = False
 
 
 class VetResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
     id: int
     email: str
     name: str
-    clinic_name: Optional[str] = None
-    license_number: Optional[str] = None
-    specialty: Optional[str] = None
-    avatar_uri: Optional[str] = None
+    clinic_name: str | None
+    license_number: str | None
+    specialty: str | None
+    avatar_uri: str | None
     is_online: bool
+    verification_status: str
+    is_accepting_consultations: bool
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+
+class ProviderResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    name: str
+    provider_type: str
+    address: str | None
+    phone: str | None
+    latitude: float | None
+    longitude: float | None
+    operating_hours: dict | None
+    provider_status: str
+    consultation_enabled: bool
+    distance_km: float | None = None
 
 
 class ConsultationCreate(BaseModel):
     pet_id: int
     vet_id: int
-    # Optional AI assessment being forwarded for professional review (UD-06).
-    assessment_id: Optional[int] = None
-    notes: Optional[str] = None
+    provider_id: int | None = None
+    assessment_id: int | None = None
+    subject: str | None = Field(default=None, max_length=200)
+    notes: str | None = None
 
 
 class ConsultationResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
     id: int
     pet_id: int
     vet_id: int
+    provider_id: int | None
     status: models.ConsultationStatus
-    assessment_id: Optional[int] = None
-    notes: Optional[str] = None
+    assessment_id: int | None
+    subject: str | None
+    notes: str | None
     created_at: datetime
-    updated_at: Optional[datetime] = None
-
-    class Config:
-        from_attributes = True
+    updated_at: datetime | None
+    closed_at: datetime | None
 
 
 class StatusUpdate(BaseModel):
-    status: str  # PENDING | ACTIVE | COMPLETED | CANCELLED
+    status: Literal["PENDING", "ACTIVE", "COMPLETED", "CANCELLED"]
 
 
 class MessageCreate(BaseModel):
-    sender_type: str  # "user" | "vet"
-    sender_id: Optional[int] = None
-    content: Optional[str] = None
-    attachment_uri: Optional[str] = None
+    content: str | None = None
+    attachment_uri: str | None = None
+    client_message_id: uuid.UUID | None = None
+    # Retained only for compatibility. Identity is always derived from JWT.
+    sender_type: Literal["user", "vet"] | None = None
+    sender_id: int | None = None
 
 
 class MessageResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
     id: int
     consultation_id: int
     sender_type: models.MessageSender
-    sender_id: Optional[int] = None
-    content: Optional[str] = None
-    attachment_uri: Optional[str] = None
+    sender_id: int | None
+    content: str | None
+    attachment_uri: str | None
+    message_type: str
+    client_message_id: uuid.UUID | None
     is_read: bool
+    delivered_at: datetime | None
+    read_at: datetime | None
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+
+class ShareAssessmentRequest(BaseModel):
+    assessment_id: int
 
 
-# ==========================================
-# Veterinarians
-# ==========================================
+class SharedAssessmentResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    consultation_id: int
+    assessment_id: int
+    shared_at: datetime
+    revoked_at: datetime | None
+
+
+class AppointmentCreate(BaseModel):
+    starts_at: datetime
+    ends_at: datetime | None = None
+    reason: str | None = None
+
+
+class AppointmentDecision(BaseModel):
+    decision: Literal["accepted", "declined"]
+
+
+class AppointmentResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    consultation_id: int
+    pet_id: int
+    provider_id: int | None
+    proposed_by_vet_id: int
+    starts_at: datetime
+    ends_at: datetime | None
+    reason: str | None
+    status: str
+    responded_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+def _require_participant(
+    consultation_id: int, actor: AuthenticatedActor, db: Session
+) -> models.Consultation:
+    consultation = db.query(models.Consultation).filter_by(id=consultation_id).first()
+    if not consultation:
+        raise HTTPException(status_code=404, detail="Consultation not found")
+    if actor.role == "owner":
+        pet = db.query(models.Pet).filter_by(id=consultation.pet_id).first()
+        allowed = bool(pet and pet.user_id == actor.user.id)
+    else:
+        allowed = consultation.vet_id == actor.veterinarian.id
+    if not allowed:
+        raise HTTPException(status_code=404, detail="Consultation not found")
+    return consultation
+
+
+def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    radius = 6371.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    value = math.sin(dphi / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dlambda / 2) ** 2
+    return radius * 2 * math.atan2(math.sqrt(value), math.sqrt(1 - value))
+
+
 @router.post("/veterinarians", response_model=VetResponse)
 def create_vet(vet: VetCreate, db: Session = Depends(get_db)):
-    # Dev/seed helper: real vet onboarding (Supabase-Auth vet accounts) is a
-    # Progress II work item. Disabled on production unless explicitly enabled.
     if os.getenv("ENABLE_MOCK_DATA", "").lower() not in ("1", "true", "yes"):
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
-    db_vet = models.Veterinarian(**vet.model_dump())
+    db_vet = models.Veterinarian(**vet.model_dump(), verification_status="approved")
     db.add(db_vet)
     db.commit()
     db.refresh(db_vet)
     return db_vet
 
 
-@router.get("/veterinarians", response_model=List[VetResponse])
-def list_vets(online_only: bool = False, db: Session = Depends(get_db)):
-    query = db.query(models.Veterinarian)
+@router.get("/veterinarians", response_model=list[VetResponse])
+def list_vets(
+    online_only: bool = False,
+    db: Session = Depends(get_db),
+    _: models.User = Depends(get_current_user),
+):
+    query = db.query(models.Veterinarian).filter(
+        models.Veterinarian.verification_status == "approved"
+    )
     if online_only:
         query = query.filter(models.Veterinarian.is_online.is_(True))
-    return query.order_by(models.Veterinarian.name.asc()).all()
+    return query.order_by(models.Veterinarian.name).all()
 
 
-# ==========================================
-# Consultations
-# ==========================================
-def _require_owned_consultation(consultation_id: int, current_user: models.User, db: Session) -> models.Consultation:
-    consult = db.query(models.Consultation).filter(
-        models.Consultation.id == consultation_id
-    ).first()
-    if not consult:
-        raise HTTPException(status_code=404, detail="Consultation not found")
-    require_owned_pet(consult.pet_id, current_user, db)
-    return consult
+@router.get("/veterinary-providers", response_model=list[ProviderResponse])
+def list_providers(
+    latitude: float | None = Query(default=None, ge=-90, le=90),
+    longitude: float | None = Query(default=None, ge=-180, le=180),
+    consultation_only: bool = False,
+    limit: int = Query(50, ge=1, le=100),
+    db: Session = Depends(get_db),
+    _: models.User = Depends(get_current_user),
+):
+    query = db.query(models.VeterinaryProvider).filter(
+        models.VeterinaryProvider.provider_status != "disabled"
+    )
+    if consultation_only:
+        query = query.filter(models.VeterinaryProvider.consultation_enabled.is_(True))
+    providers = query.limit(limit).all()
+    result = []
+    for provider in providers:
+        item = ProviderResponse.model_validate(provider)
+        if latitude is not None and longitude is not None and provider.latitude is not None and provider.longitude is not None:
+            item.distance_km = round(_haversine_km(latitude, longitude, float(provider.latitude), float(provider.longitude)), 2)
+        result.append(item)
+    if latitude is not None and longitude is not None:
+        result.sort(key=lambda p: p.distance_km if p.distance_km is not None else float("inf"))
+    return result
 
 
 @router.post("/consultations", response_model=ConsultationResponse)
 def create_consultation(
     payload: ConsultationCreate,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
+    owner: models.User = Depends(get_current_user),
 ):
-    require_owned_pet(payload.pet_id, current_user, db)
-    vet = db.query(models.Veterinarian).filter(models.Veterinarian.id == payload.vet_id).first()
-    if not vet:
-        raise HTTPException(status_code=404, detail="Veterinarian not found")
+    require_owned_pet(payload.pet_id, owner, db)
+    vet = db.query(models.Veterinarian).filter_by(id=payload.vet_id).first()
+    if not vet or vet.verification_status != "approved":
+        raise HTTPException(status_code=404, detail="Verified veterinarian not found")
+    if not vet.is_accepting_consultations:
+        raise HTTPException(status_code=409, detail="Veterinarian is not accepting consultations")
+    if payload.provider_id is not None:
+        link = db.query(models.ProviderVeterinarian).join(models.VeterinaryProvider).filter(
+            models.ProviderVeterinarian.provider_id == payload.provider_id,
+            models.ProviderVeterinarian.veterinarian_id == payload.vet_id,
+            models.ProviderVeterinarian.is_active.is_(True),
+            models.ProviderVeterinarian.accepting_consultations.is_(True),
+            models.VeterinaryProvider.consultation_enabled.is_(True),
+        ).first()
+        if not link:
+            raise HTTPException(status_code=409, detail="Consultation is not available for this provider")
+    assessment = None
     if payload.assessment_id is not None:
-        assessment = db.query(models.HealthAssessment).filter(
-            models.HealthAssessment.id == payload.assessment_id,
-            models.HealthAssessment.pet_id == payload.pet_id,
+        assessment = db.query(models.HealthAssessment).filter_by(
+            id=payload.assessment_id, pet_id=payload.pet_id
         ).first()
         if not assessment:
             raise HTTPException(status_code=404, detail="Assessment not found for this pet")
-
-    db_consult = models.Consultation(**payload.model_dump())
-    db.add(db_consult)
+    consultation = models.Consultation(**payload.model_dump())
+    db.add(consultation)
+    db.flush()
+    if assessment:
+        db.add(models.ConsultationSharedAssessment(
+            consultation_id=consultation.id,
+            assessment_id=assessment.id,
+            shared_by_user_id=owner.id,
+        ))
     db.commit()
-    db.refresh(db_consult)
-    return db_consult
+    db.refresh(consultation)
+    return consultation
 
 
-@router.get("/pets/{pet_id}/consultations", response_model=List[ConsultationResponse])
+@router.get("/pets/{pet_id}/consultations", response_model=list[ConsultationResponse])
 def list_pet_consultations(
     pet_id: int,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
+    owner: models.User = Depends(get_current_user),
 ):
-    require_owned_pet(pet_id, current_user, db)
-    return db.query(models.Consultation).filter(
-        models.Consultation.pet_id == pet_id
-    ).order_by(models.Consultation.created_at.desc()).all()
+    require_owned_pet(pet_id, owner, db)
+    return db.query(models.Consultation).filter_by(pet_id=pet_id).order_by(
+        models.Consultation.updated_at.desc()
+    ).all()
+
+
+@router.get("/vet/consultations", response_model=list[ConsultationResponse])
+def list_vet_consultations(
+    db: Session = Depends(get_db),
+    actor: AuthenticatedActor = Depends(get_current_actor),
+):
+    if actor.role != "vet":
+        raise HTTPException(status_code=403, detail="Veterinarian access required")
+    return db.query(models.Consultation).filter_by(vet_id=actor.veterinarian.id).order_by(
+        models.Consultation.updated_at.desc()
+    ).all()
 
 
 @router.get("/consultations/{consultation_id}", response_model=ConsultationResponse)
 def get_consultation(
     consultation_id: int,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
+    actor: AuthenticatedActor = Depends(get_current_actor),
 ):
-    return _require_owned_consultation(consultation_id, current_user, db)
+    return _require_participant(consultation_id, actor, db)
 
 
 @router.put("/consultations/{consultation_id}/status", response_model=ConsultationResponse)
@@ -182,146 +308,234 @@ def update_status(
     consultation_id: int,
     payload: StatusUpdate,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
+    actor: AuthenticatedActor = Depends(get_current_actor),
 ):
-    consult = _require_owned_consultation(consultation_id, current_user, db)
-
-    try:
-        consult.status = models.ConsultationStatus[payload.status.upper()]
-    except KeyError:
-        raise HTTPException(
-            status_code=400,
-            detail="Status must be one of: PENDING, ACTIVE, COMPLETED, CANCELLED",
-        )
+    consultation = _require_participant(consultation_id, actor, db)
+    consultation.status = models.ConsultationStatus[payload.status]
+    consultation.updated_at = now_bkk()
+    consultation.closed_at = now_bkk() if payload.status in {"COMPLETED", "CANCELLED"} else None
     db.commit()
-    db.refresh(consult)
-    return consult
+    db.refresh(consultation)
+    return consultation
 
 
-# ==========================================
-# Messages
-# ==========================================
 @router.post("/consultations/{consultation_id}/messages", response_model=MessageResponse)
 def send_message(
     consultation_id: int,
     payload: MessageCreate,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
+    actor: AuthenticatedActor = Depends(get_current_actor),
 ):
-    _require_owned_consultation(consultation_id, current_user, db)
-
+    consultation = _require_participant(consultation_id, actor, db)
     if not payload.content and not payload.attachment_uri:
         raise HTTPException(status_code=400, detail="Message must have content or an attachment")
-
-    # Pet-owner tokens can only speak as "user". Vet-side messaging arrives
-    # with vet Supabase-Auth accounts (Progress II); AI messages are created
-    # server-side by the ai-summary endpoint.
-    if payload.sender_type != "user":
-        raise HTTPException(status_code=403, detail="Owners can only send as 'user'")
-
-    db_msg = models.Message(
+    actual_sender = "user" if actor.role == "owner" else "vet"
+    if payload.sender_type and payload.sender_type != actual_sender:
+        raise HTTPException(status_code=403, detail="Message sender must match authenticated account")
+    sender_id = actor.user.id if actor.role == "owner" else actor.veterinarian.id
+    client_id = payload.client_message_id or uuid.uuid4()
+    existing = db.query(models.Message).filter_by(
+        consultation_id=consultation_id, client_message_id=client_id
+    ).first()
+    if existing:
+        return existing
+    message = models.Message(
         consultation_id=consultation_id,
-        sender_type=models.MessageSender.USER,
-        sender_id=current_user.id,
+        sender_type=models.MessageSender.USER if actor.role == "owner" else models.MessageSender.VET,
+        sender_id=sender_id,
         content=payload.content,
         attachment_uri=payload.attachment_uri,
+        client_message_id=client_id,
+        delivered_at=now_bkk(),
     )
-    db.add(db_msg)
-    db.commit()
-    db.refresh(db_msg)
-    return db_msg
+    db.add(message)
+    consultation.updated_at = now_bkk()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        return db.query(models.Message).filter_by(
+            consultation_id=consultation_id, client_message_id=client_id
+        ).one()
+    db.refresh(message)
+    return message
 
 
-@router.get("/consultations/{consultation_id}/messages", response_model=List[MessageResponse])
+@router.get("/consultations/{consultation_id}/messages", response_model=list[MessageResponse])
 def list_messages(
     consultation_id: int,
+    after_id: int | None = Query(default=None, ge=1),
+    limit: int = Query(100, ge=1, le=200),
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
+    actor: AuthenticatedActor = Depends(get_current_actor),
 ):
-    _require_owned_consultation(consultation_id, current_user, db)
-    return db.query(models.Message).filter(
-        models.Message.consultation_id == consultation_id
-    ).order_by(models.Message.created_at.asc()).all()
+    _require_participant(consultation_id, actor, db)
+    query = db.query(models.Message).filter_by(consultation_id=consultation_id)
+    if after_id:
+        query = query.filter(models.Message.id > after_id)
+    return query.order_by(models.Message.id).limit(limit).all()
 
 
-# ==========================================
-# AI Assistance (Feature 3)
-# ==========================================
+@router.post("/consultations/{consultation_id}/messages/read", status_code=204)
+def mark_messages_read(
+    consultation_id: int,
+    db: Session = Depends(get_db),
+    actor: AuthenticatedActor = Depends(get_current_actor),
+):
+    _require_participant(consultation_id, actor, db)
+    own_type = models.MessageSender.USER if actor.role == "owner" else models.MessageSender.VET
+    now = now_bkk()
+    db.query(models.Message).filter(
+        models.Message.consultation_id == consultation_id,
+        models.Message.sender_type != own_type,
+        models.Message.read_at.is_(None),
+    ).update({models.Message.is_read: True, models.Message.read_at: now}, synchronize_session=False)
+    db.commit()
+
+
+@router.post("/consultations/{consultation_id}/shared-assessments", response_model=SharedAssessmentResponse)
+def share_assessment(
+    consultation_id: int,
+    payload: ShareAssessmentRequest,
+    db: Session = Depends(get_db),
+    actor: AuthenticatedActor = Depends(get_current_actor),
+):
+    consultation = _require_participant(consultation_id, actor, db)
+    if actor.role != "owner":
+        raise HTTPException(status_code=403, detail="Only the pet owner can share an assessment")
+    assessment = db.query(models.HealthAssessment).filter_by(
+        id=payload.assessment_id, pet_id=consultation.pet_id
+    ).first()
+    if not assessment:
+        raise HTTPException(status_code=404, detail="Assessment not found for this pet")
+    shared = db.query(models.ConsultationSharedAssessment).filter_by(
+        consultation_id=consultation_id, assessment_id=assessment.id
+    ).first()
+    if not shared:
+        shared = models.ConsultationSharedAssessment(
+            consultation_id=consultation_id,
+            assessment_id=assessment.id,
+            shared_by_user_id=actor.user.id,
+        )
+        db.add(shared)
+    else:
+        shared.revoked_at = None
+    db.commit()
+    db.refresh(shared)
+    return shared
+
+
+@router.delete("/consultations/{consultation_id}/shared-assessments/{assessment_id}", status_code=204)
+def revoke_assessment_share(
+    consultation_id: int,
+    assessment_id: int,
+    db: Session = Depends(get_db),
+    actor: AuthenticatedActor = Depends(get_current_actor),
+):
+    _require_participant(consultation_id, actor, db)
+    if actor.role != "owner":
+        raise HTTPException(status_code=403, detail="Only the pet owner can revoke sharing")
+    shared = db.query(models.ConsultationSharedAssessment).filter_by(
+        consultation_id=consultation_id, assessment_id=assessment_id
+    ).first()
+    if not shared:
+        raise HTTPException(status_code=404, detail="Shared assessment not found")
+    shared.revoked_at = now_bkk()
+    db.commit()
+
+
+@router.post("/consultations/{consultation_id}/appointments", response_model=AppointmentResponse)
+def propose_appointment(
+    consultation_id: int,
+    payload: AppointmentCreate,
+    db: Session = Depends(get_db),
+    actor: AuthenticatedActor = Depends(get_current_actor),
+):
+    consultation = _require_participant(consultation_id, actor, db)
+    if actor.role != "vet":
+        raise HTTPException(status_code=403, detail="Only the assigned veterinarian can propose appointments")
+    if payload.ends_at and payload.ends_at <= payload.starts_at:
+        raise HTTPException(status_code=422, detail="ends_at must be after starts_at")
+    appointment = models.Appointment(
+        consultation_id=consultation.id,
+        pet_id=consultation.pet_id,
+        provider_id=consultation.provider_id,
+        proposed_by_vet_id=actor.veterinarian.id,
+        **payload.model_dump(),
+    )
+    db.add(appointment)
+    db.commit()
+    db.refresh(appointment)
+    return appointment
+
+
+@router.put("/appointments/{appointment_id}/decision", response_model=AppointmentResponse)
+def decide_appointment(
+    appointment_id: int,
+    payload: AppointmentDecision,
+    db: Session = Depends(get_db),
+    actor: AuthenticatedActor = Depends(get_current_actor),
+):
+    appointment = db.query(models.Appointment).filter_by(id=appointment_id).first()
+    if not appointment:
+        raise HTTPException(status_code=404, detail="Appointment not found")
+    _require_participant(appointment.consultation_id, actor, db)
+    if actor.role != "owner":
+        raise HTTPException(status_code=403, detail="Only the pet owner can respond")
+    if appointment.status != "proposed":
+        raise HTTPException(status_code=409, detail="Appointment has already been answered")
+    appointment.status = payload.decision
+    appointment.responded_at = now_bkk()
+    appointment.updated_at = now_bkk()
+    if payload.decision == "accepted":
+        db.add(models.CalendarEvent(
+            pet_id=appointment.pet_id,
+            appointment_id=appointment.id,
+            title="Veterinary appointment",
+            event_type="vet",
+            event_date=appointment.starts_at.date(),
+            starts_at=appointment.starts_at,
+            reminder_minutes=30,
+        ))
+    db.commit()
+    db.refresh(appointment)
+    return appointment
+
+
 @router.post("/consultations/{consultation_id}/ai-summary", response_model=MessageResponse)
 def post_ai_summary(
     consultation_id: int,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
+    actor: AuthenticatedActor = Depends(get_current_actor),
 ):
-    """Generate an AI-assist briefing for the vet and post it into the chat.
-
-    Composes a structured summary of the pet profile, the forwarded/latest
-    assessment, recent activity totals, and vaccination status, stored as a
-    message with sender_type='ai'. Deterministic by design so it works without
-    the Gemini key; polishing the wording through Gemini is a Progress II
-    enhancement.
-    """
-    consult = _require_owned_consultation(consultation_id, current_user, db)
-    pet = db.query(models.Pet).filter(models.Pet.id == consult.pet_id).first()
-
-    assessment = None
-    if consult.assessment_id:
-        assessment = db.query(models.HealthAssessment).filter(
-            models.HealthAssessment.id == consult.assessment_id
-        ).first()
-    if assessment is None:
-        assessment = db.query(models.HealthAssessment).filter(
-            models.HealthAssessment.pet_id == pet.id,
-            models.HealthAssessment.status == "completed",
-            models.HealthAssessment.risk_level.isnot(None),
-        ).order_by(models.HealthAssessment.created_at.desc()).first()
-
-    activities = db.query(models.ActivityLog).filter(
-        models.ActivityLog.pet_id == pet.id
-    ).order_by(models.ActivityLog.created_at.desc()).limit(30).all()
-    total_min = sum(a.duration_minutes or 0 for a in activities)
-
-    last_vac = db.query(models.Vaccination).filter(
-        models.Vaccination.pet_id == pet.id
-    ).order_by(models.Vaccination.date_administered.desc()).first()
-
-    species_bit = ""
-    if pet.species and pet.breed:
-        species_bit = f" ({pet.species}, {pet.breed})"
-    elif pet.species:
-        species_bit = f" ({pet.species})"
-
-    if assessment:
-        risk = assessment.risk_level.value if assessment.risk_level else "n/a"
-        snippet = (assessment.symptom_description or "")[:140]
-        assessment_line = f"Latest AI check: {risk} - {snippet}"
-    else:
-        assessment_line = "No AI assessments recorded."
-
-    if last_vac:
-        vac_line = f"Last vaccination: {last_vac.vaccine_name} on {last_vac.date_administered}"
-        if last_vac.next_due_date:
-            vac_line += f", next due {last_vac.next_due_date}"
-    else:
-        vac_line = "No vaccination records."
-
+    consultation = _require_participant(consultation_id, actor, db)
+    pet = db.query(models.Pet).filter_by(id=consultation.pet_id).one()
+    assessment = db.query(models.HealthAssessment).filter(
+        models.HealthAssessment.pet_id == pet.id,
+        models.HealthAssessment.status == "completed",
+    ).order_by(models.HealthAssessment.created_at.desc()).first()
+    activities = db.query(models.ActivityLog).filter_by(pet_id=pet.id).order_by(
+        models.ActivityLog.created_at.desc()
+    ).limit(30).all()
+    vaccination = db.query(models.Vaccination).filter_by(pet_id=pet.id).order_by(
+        models.Vaccination.date_administered.desc()
+    ).first()
     lines = [
-        f"AI BRIEFING for {pet.name}{species_bit}",
-        f"Weight: {pet.weight_kg} kg" if pet.weight_kg else None,
-        assessment_line,
-        f"Recent activity: {len(activities)} sessions, {total_min:.0f} min total.",
-        vac_line,
+        f"AI BRIEFING for {pet.name}",
+        f"Latest AI check: {assessment.risk_level.value if assessment and assessment.risk_level else 'n/a'}",
+        f"Recent activity: {len(activities)} sessions, {sum(a.duration_minutes or 0 for a in activities):.0f} min total.",
+        f"Last vaccination: {vaccination.vaccine_name} on {vaccination.date_administered}" if vaccination else "No vaccination records.",
         "Generated by Petto AI assist - preliminary information, not a diagnosis.",
     ]
-    content = chr(10).join(x for x in lines if x)
-
-    db_msg = models.Message(
+    message = models.Message(
         consultation_id=consultation_id,
         sender_type=models.MessageSender.AI,
-        content=content,
+        message_type="ai",
+        content="\n".join(lines),
+        delivered_at=now_bkk(),
     )
-    db.add(db_msg)
-    consult.updated_at = now_bkk()
+    db.add(message)
+    consultation.updated_at = now_bkk()
     db.commit()
-    db.refresh(db_msg)
-    return db_msg
+    db.refresh(message)
+    return message

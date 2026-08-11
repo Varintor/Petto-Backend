@@ -1,5 +1,6 @@
 import os
 from dataclasses import dataclass
+from typing import Literal
 
 from fastapi import Depends, HTTPException
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -23,6 +24,13 @@ class SupabaseAuthContext:
 
     supabase_uid: str
     access_token: str
+
+
+@dataclass(frozen=True)
+class AuthenticatedActor:
+    role: Literal["owner", "vet"]
+    user: models.User | None = None
+    veterinarian: models.Veterinarian | None = None
 
 
 def register_user(email: str, password: str):
@@ -84,6 +92,37 @@ def get_current_user(
         raise HTTPException(status_code=401, detail="User not found")
 
     return user
+
+
+def get_current_veterinarian(
+    supabase_uid: str = Depends(get_supabase_uid),
+    db: Session = Depends(get_db),
+) -> models.Veterinarian:
+    vet = db.query(models.Veterinarian).filter(
+        models.Veterinarian.supabase_uid == supabase_uid
+    ).first()
+    if not vet:
+        raise HTTPException(status_code=401, detail="Veterinarian account not found")
+    if vet.verification_status != "approved":
+        raise HTTPException(status_code=403, detail="Veterinarian account is not approved")
+    return vet
+
+
+def get_current_actor(
+    supabase_uid: str = Depends(get_supabase_uid),
+    db: Session = Depends(get_db),
+) -> AuthenticatedActor:
+    user = db.query(models.User).filter(models.User.supabase_uid == supabase_uid).first()
+    if user:
+        return AuthenticatedActor(role="owner", user=user)
+    vet = db.query(models.Veterinarian).filter(
+        models.Veterinarian.supabase_uid == supabase_uid
+    ).first()
+    if not vet:
+        raise HTTPException(status_code=401, detail="Account not found")
+    if vet.verification_status != "approved":
+        raise HTTPException(status_code=403, detail="Veterinarian account is not approved")
+    return AuthenticatedActor(role="vet", veterinarian=vet)
 
 
 def require_owned_pet(pet_id: int, current_user: models.User, db: Session) -> models.Pet:
