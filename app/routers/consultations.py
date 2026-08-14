@@ -491,6 +491,10 @@ def propose_appointment(
     consultation = _require_participant(consultation_id, actor, db)
     if actor.role != "vet":
         raise HTTPException(status_code=403, detail="Only the assigned veterinarian can propose appointments")
+    if payload.starts_at.tzinfo is None:
+        raise HTTPException(status_code=422, detail="starts_at must include a timezone")
+    if payload.starts_at <= now_bkk():
+        raise HTTPException(status_code=422, detail="starts_at must be in the future")
     if payload.ends_at and payload.ends_at <= payload.starts_at:
         raise HTTPException(status_code=422, detail="ends_at must be after starts_at")
     appointment = models.Appointment(
@@ -504,6 +508,25 @@ def propose_appointment(
     db.commit()
     db.refresh(appointment)
     return appointment
+
+
+@router.get(
+    "/consultations/{consultation_id}/appointments",
+    response_model=list[AppointmentResponse],
+)
+def list_consultation_appointments(
+    consultation_id: int,
+    db: Session = Depends(get_db),
+    actor: AuthenticatedActor = Depends(get_current_actor),
+):
+    """List appointment proposals visible to either consultation participant."""
+    _require_participant(consultation_id, actor, db)
+    return (
+        db.query(models.Appointment)
+        .filter_by(consultation_id=consultation_id)
+        .order_by(models.Appointment.starts_at.desc(), models.Appointment.id.desc())
+        .all()
+    )
 
 
 @router.put("/appointments/{appointment_id}/decision", response_model=AppointmentResponse)

@@ -132,6 +132,11 @@ def test_vet_proposes_and_owner_accepts_appointment_into_calendar(
     app.dependency_overrides[get_current_actor] = lambda: AuthenticatedActor(
         role="vet", veterinarian=approved_vet
     )
+    past = auth_client.post(
+        f"/api/v1/consultations/{consultation_id}/appointments",
+        json={"starts_at": (now_bkk() - timedelta(minutes=1)).isoformat()},
+    )
+    assert past.status_code == 422
     starts_at = now_bkk() + timedelta(days=3)
     proposed = auth_client.post(
         f"/api/v1/consultations/{consultation_id}/appointments",
@@ -139,6 +144,13 @@ def test_vet_proposes_and_owner_accepts_appointment_into_calendar(
     )
     app.dependency_overrides.pop(get_current_actor, None)
     assert proposed.status_code == 200, proposed.text
+
+    listed = auth_client.get(
+        f"/api/v1/consultations/{consultation_id}/appointments"
+    )
+    assert listed.status_code == 200, listed.text
+    assert [item["id"] for item in listed.json()] == [proposed.json()["id"]]
+    assert listed.json()[0]["status"] == "proposed"
 
     accepted = auth_client.put(
         f"/api/v1/appointments/{proposed.json()['id']}/decision",
@@ -148,3 +160,8 @@ def test_vet_proposes_and_owner_accepts_appointment_into_calendar(
     events = auth_client.get(f"/api/v1/pets/{pet.id}/calendar-events").json()
     assert len(events) == 1
     assert events[0]["appointment_id"] == proposed.json()["id"]
+
+    answered = auth_client.get(
+        f"/api/v1/consultations/{consultation_id}/appointments"
+    ).json()
+    assert answered[0]["status"] == "accepted"
