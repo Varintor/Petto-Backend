@@ -119,6 +119,57 @@ def test_only_approved_accepting_vet_can_be_consulted(auth_client, pet, db):
     assert response.status_code == 404
 
 
+def test_provider_directory_exposes_only_available_verified_vets(
+    auth_client, approved_vet, db
+):
+    provider = models.VeterinaryProvider(
+        name="CMU Small Animal Hospital",
+        provider_type="hospital",
+        address="Chiang Mai",
+        phone="053-000-000",
+        latitude=18.795,
+        longitude=98.952,
+        provider_status="partner",
+        consultation_enabled=True,
+    )
+    hidden_vet = models.Veterinarian(
+        email="hidden-vet@test.com",
+        name="Dr. Hidden",
+        verification_status="pending",
+        is_accepting_consultations=True,
+    )
+    db.add_all([provider, hidden_vet])
+    db.flush()
+    db.add_all([
+        models.ProviderVeterinarian(
+            provider_id=provider.id,
+            veterinarian_id=approved_vet.id,
+            is_active=True,
+            accepting_consultations=True,
+        ),
+        models.ProviderVeterinarian(
+            provider_id=provider.id,
+            veterinarian_id=hidden_vet.id,
+            is_active=True,
+            accepting_consultations=True,
+        ),
+    ])
+    db.commit()
+
+    directory = auth_client.get(
+        "/api/v1/veterinary-providers",
+        params={"latitude": 18.79, "longitude": 98.95},
+    )
+    assert directory.status_code == 200, directory.text
+    assert directory.json()[0]["distance_km"] is not None
+
+    vets = auth_client.get(
+        f"/api/v1/veterinary-providers/{provider.id}/veterinarians"
+    )
+    assert vets.status_code == 200, vets.text
+    assert [item["id"] for item in vets.json()] == [approved_vet.id]
+
+
 def test_vet_proposes_and_owner_accepts_appointment_into_calendar(
     auth_client, pet, approved_vet, db
 ):

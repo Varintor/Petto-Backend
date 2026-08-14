@@ -258,6 +258,36 @@ def list_providers(
     return result
 
 
+@router.get(
+    "/veterinary-providers/{provider_id}/veterinarians",
+    response_model=list[VetResponse],
+)
+def list_provider_veterinarians(
+    provider_id: int,
+    db: Session = Depends(get_db),
+    _: models.User = Depends(get_current_user),
+):
+    """List verified veterinarians available through one Petto provider."""
+    provider = db.query(models.VeterinaryProvider).filter_by(id=provider_id).first()
+    if not provider or provider.provider_status == "disabled":
+        raise HTTPException(status_code=404, detail="Veterinary provider not found")
+    if not provider.consultation_enabled:
+        return []
+    return (
+        db.query(models.Veterinarian)
+        .join(models.ProviderVeterinarian)
+        .filter(
+            models.ProviderVeterinarian.provider_id == provider_id,
+            models.ProviderVeterinarian.is_active.is_(True),
+            models.ProviderVeterinarian.accepting_consultations.is_(True),
+            models.Veterinarian.verification_status == "approved",
+            models.Veterinarian.is_accepting_consultations.is_(True),
+        )
+        .order_by(models.Veterinarian.name)
+        .all()
+    )
+
+
 @router.post("/consultations", response_model=ConsultationResponse)
 def create_consultation(
     payload: ConsultationCreate,
