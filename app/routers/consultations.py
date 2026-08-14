@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app import models
 from app.auth import AuthenticatedActor, get_current_actor, get_current_user, require_owned_pet
@@ -81,6 +81,11 @@ class ConsultationResponse(BaseModel):
     created_at: datetime
     updated_at: datetime | None
     closed_at: datetime | None
+    pet_name: str | None = None
+    pet_species: str | None = None
+    owner_name: str | None = None
+    vet_name: str | None = None
+    provider_name: str | None = None
 
 
 class StatusUpdate(BaseModel):
@@ -151,10 +156,36 @@ class AppointmentResponse(BaseModel):
     updated_at: datetime
 
 
+def _consultation_query(db: Session):
+    """Load display data with the consultation and avoid per-row queries."""
+    return db.query(models.Consultation).options(
+        joinedload(models.Consultation.pet).joinedload(models.Pet.owner),
+        joinedload(models.Consultation.vet),
+        joinedload(models.Consultation.provider),
+    )
+
+
+def _consultation_response(
+    consultation: models.Consultation,
+) -> ConsultationResponse:
+    pet = consultation.pet
+    return ConsultationResponse.model_validate(consultation).model_copy(
+        update={
+            "pet_name": pet.name if pet else None,
+            "pet_species": pet.species if pet else None,
+            "owner_name": pet.owner.name if pet and pet.owner else None,
+            "vet_name": consultation.vet.name if consultation.vet else None,
+            "provider_name": (
+                consultation.provider.name if consultation.provider else None
+            ),
+        }
+    )
+
+
 def _require_participant(
     consultation_id: int, actor: AuthenticatedActor, db: Session
 ) -> models.Consultation:
-    consultation = db.query(models.Consultation).filter_by(id=consultation_id).first()
+    consultation = _consultation_query(db).filter_by(id=consultation_id).first()
     if not consultation:
         raise HTTPException(status_code=404, detail="Consultation not found")
     if actor.role == "owner":
@@ -267,7 +298,7 @@ def create_consultation(
         ))
     db.commit()
     db.refresh(consultation)
-    return consultation
+    return _consultation_response(consultation)
 
 
 @router.get("/pets/{pet_id}/consultations", response_model=list[ConsultationResponse])
@@ -277,9 +308,10 @@ def list_pet_consultations(
     owner: models.User = Depends(get_current_user),
 ):
     require_owned_pet(pet_id, owner, db)
-    return db.query(models.Consultation).filter_by(pet_id=pet_id).order_by(
+    consultations = _consultation_query(db).filter_by(pet_id=pet_id).order_by(
         models.Consultation.updated_at.desc()
     ).all()
+    return [_consultation_response(item) for item in consultations]
 
 
 @router.get("/vet/consultations", response_model=list[ConsultationResponse])
@@ -289,9 +321,13 @@ def list_vet_consultations(
 ):
     if actor.role != "vet":
         raise HTTPException(status_code=403, detail="Veterinarian access required")
-    return db.query(models.Consultation).filter_by(vet_id=actor.veterinarian.id).order_by(
-        models.Consultation.updated_at.desc()
-    ).all()
+    consultations = (
+        _consultation_query(db)
+        .filter_by(vet_id=actor.veterinarian.id)
+        .order_by(models.Consultation.updated_at.desc())
+        .all()
+    )
+    return [_consultation_response(item) for item in consultations]
 
 
 @router.get("/consultations/{consultation_id}", response_model=ConsultationResponse)
@@ -300,7 +336,8 @@ def get_consultation(
     db: Session = Depends(get_db),
     actor: AuthenticatedActor = Depends(get_current_actor),
 ):
-    return _require_participant(consultation_id, actor, db)
+    consultation = _require_participant(consultation_id, actor, db)
+    return _consultation_response(consultation)
 
 
 @router.put("/consultations/{consultation_id}/status", response_model=ConsultationResponse)
@@ -316,7 +353,7 @@ def update_status(
     consultation.closed_at = now_bkk() if payload.status in {"COMPLETED", "CANCELLED"} else None
     db.commit()
     db.refresh(consultation)
-    return consultation
+    return _consultation_response(consultation)
 
 
 @router.post("/consultations/{consultation_id}/messages", response_model=MessageResponse)

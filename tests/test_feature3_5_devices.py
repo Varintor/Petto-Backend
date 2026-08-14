@@ -50,6 +50,22 @@ def test_consultation_requires_auth(client, pet, vet):
     assert r.status_code in (401, 403)
 
 
+def test_consultation_response_includes_participant_display_data(
+    auth_client, pet, vet
+):
+    response = auth_client.post(
+        "/api/v1/consultations",
+        json={"pet_id": pet.id, "vet_id": vet.id},
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["pet_name"] == pet.name
+    assert body["pet_species"] == pet.species
+    assert body["owner_name"] == pet.owner.name
+    assert body["vet_name"] == vet.name
+
+
 def test_owner_can_chat_but_cannot_forge_vet(auth_client, consultation):
     cid = consultation["id"]
     ok = auth_client.post(f"/api/v1/consultations/{cid}/messages",
