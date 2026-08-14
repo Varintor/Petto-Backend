@@ -57,3 +57,73 @@ def test_login_invalid_credentials(client, monkeypatch):
                     json={"email": "user@test.com", "password": "wrong"})
     assert r.status_code == 401
     assert r.json()["detail"] == "Invalid email or password"
+
+
+def test_login_approved_veterinarian_returns_veterinarian_role(client, db, monkeypatch):
+    db.add(models.Veterinarian(
+        email="doctor@petto.test",
+        name="Dr. Petto",
+        supabase_uid="uid-vet",
+        verification_status="approved",
+    ))
+    db.commit()
+    monkeypatch.setattr(
+        "app.routers.auth.login_user",
+        lambda e, p: _FakeAuthResp(uid="uid-vet", token="vet-token"),
+    )
+
+    response = client.post(
+        "/api/v1/auth/login",
+        json={"email": "doctor@petto.test", "password": "Password123!"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["access_token"] == "vet-token"
+    assert response.json()["user"]["role"] == "veterinarian"
+
+
+def test_login_rejects_unapproved_veterinarian(client, db, monkeypatch):
+    db.add(models.Veterinarian(
+        email="pending@petto.test",
+        name="Dr. Pending",
+        supabase_uid="uid-vet-pending",
+        verification_status="pending",
+    ))
+    db.commit()
+    monkeypatch.setattr(
+        "app.routers.auth.login_user",
+        lambda e, p: _FakeAuthResp(uid="uid-vet-pending", token="vet-token"),
+    )
+
+    response = client.post(
+        "/api/v1/auth/login",
+        json={"email": "pending@petto.test", "password": "Password123!"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Veterinarian account is not approved"
+
+
+def test_login_links_legacy_veterinarian_email_to_supabase_uid(client, db, monkeypatch):
+    veterinarian = models.Veterinarian(
+        email="legacy-vet@petto.test",
+        name="Dr. Legacy",
+        supabase_uid=None,
+        verification_status="approved",
+    )
+    db.add(veterinarian)
+    db.commit()
+    monkeypatch.setattr(
+        "app.routers.auth.login_user",
+        lambda e, p: _FakeAuthResp(uid="uid-linked-vet", token="vet-token"),
+    )
+
+    response = client.post(
+        "/api/v1/auth/login",
+        json={"email": "legacy-vet@petto.test", "password": "Password123!"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["user"]["role"] == "veterinarian"
+    db.refresh(veterinarian)
+    assert veterinarian.supabase_uid == "uid-linked-vet"

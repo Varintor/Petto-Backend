@@ -26,6 +26,7 @@ class UserResponse(BaseModel):
     email: str
     name: Optional[str] = None
     avatar_uri: Optional[str] = None
+    role: str = "owner"
 
     class Config:
         from_attributes = True

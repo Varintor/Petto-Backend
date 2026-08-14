@@ -4,7 +4,7 @@ from pydantic import BaseModel
 
 from app import models, schemas
 from app.database import get_db
-from app.auth import register_user, login_user, get_current_user
+from app.auth import register_user, login_user, get_supabase_uid
 
 router = APIRouter(
     prefix="/api/v1/auth",
@@ -15,6 +15,17 @@ router = APIRouter(
 class EmailCheckResponse(BaseModel):
     available: bool
     message: str
+
+
+def _actor_response(actor: models.User | models.Veterinarian) -> schemas.UserResponse:
+    role = "veterinarian" if isinstance(actor, models.Veterinarian) else "owner"
+    return schemas.UserResponse(
+        id=actor.id,
+        email=actor.email,
+        name=actor.name,
+        avatar_uri=actor.avatar_uri,
+        role=role,
+    )
 
 
 @router.get("/check-email", response_model=EmailCheckResponse)
@@ -110,7 +121,7 @@ def register(req: schemas.RegisterRequest, db: Session = Depends(get_db)):
 
     return schemas.AuthResponse(
         access_token=access_token,
-        user=schemas.UserResponse.model_validate(user),
+        user=_actor_response(user),
         pet=schemas.PetResponse.model_validate(created_pet) if created_pet else None,
     )
 
@@ -122,6 +133,26 @@ def login(req: schemas.LoginRequest, db: Session = Depends(get_db)):
 
     supabase_uid = response.user.id
     user = db.query(models.User).filter(models.User.supabase_uid == supabase_uid).first()
+
+    if not user:
+        veterinarian = db.query(models.Veterinarian).filter(
+            models.Veterinarian.supabase_uid == supabase_uid
+        ).first()
+        if not veterinarian:
+            veterinarian = db.query(models.Veterinarian).filter(
+                models.Veterinarian.email == email
+            ).first()
+        if veterinarian:
+            if veterinarian.verification_status != "approved":
+                raise HTTPException(status_code=403, detail="Veterinarian account is not approved")
+            if veterinarian.supabase_uid != supabase_uid:
+                veterinarian.supabase_uid = supabase_uid
+                db.commit()
+                db.refresh(veterinarian)
+            return schemas.AuthResponse(
+                access_token=response.session.access_token,
+                user=_actor_response(veterinarian),
+            )
 
     if not user:
         user = db.query(models.User).filter(models.User.email == email).first()
@@ -144,10 +175,23 @@ def login(req: schemas.LoginRequest, db: Session = Depends(get_db)):
 
     return schemas.AuthResponse(
         access_token=response.session.access_token,
-        user=schemas.UserResponse.model_validate(user),
+        user=_actor_response(user),
     )
 
 
 @router.get("/me", response_model=schemas.UserResponse)
-def get_me(current_user: models.User = Depends(get_current_user)):
-    return schemas.UserResponse.model_validate(current_user)
+def get_me(
+    supabase_uid: str = Depends(get_supabase_uid),
+    db: Session = Depends(get_db),
+):
+    user = db.query(models.User).filter(models.User.supabase_uid == supabase_uid).first()
+    if user:
+        return _actor_response(user)
+    veterinarian = db.query(models.Veterinarian).filter(
+        models.Veterinarian.supabase_uid == supabase_uid
+    ).first()
+    if not veterinarian:
+        raise HTTPException(status_code=401, detail="Account not found")
+    if veterinarian.verification_status != "approved":
+        raise HTTPException(status_code=403, detail="Veterinarian account is not approved")
+    return _actor_response(veterinarian)
