@@ -103,6 +103,10 @@ def register(req: schemas.RegisterRequest, db: Session = Depends(get_db)):
             pet = models.Pet(user_id=user.id, **req.pet.model_dump())
             db.add(pet)
             db.flush()  # surface any pet-side error inside the transaction
+            db.add(models.PetWardrobeItem(
+                pet_id=pet.id,
+                accessory_id="acc_collar",
+            ))
             created_pet = pet
 
         db.commit()

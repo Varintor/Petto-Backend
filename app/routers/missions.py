@@ -71,6 +71,26 @@ _BONUS_MISSIONS = [
     {"title": "Socialization time", "mission_type": "social", "target_value": 1, "unit": "count", "reward": "45 Treats"},
 ]
 
+# Stable IDs shared with the Flutter wardrobe catalogue. Persisting mission
+# row IDs here made valid rewards invisible to the client after a restart.
+_MISSION_ACCESSORY_MAP = {
+    "walk": "acc_hat",
+    "water": "acc_water_bowl",
+    "ai_check": "acc_doctor_coat",
+    "grooming": "acc_brush",
+    "play": "acc_ball",
+    "photo": "acc_camera",
+    "dental_check": "acc_toothbrush",
+    "nail_check": "acc_nail_file",
+    "ear_check": "acc_ear_tag",
+    "weight_log": "acc_scale",
+    "bonding": "acc_heart",
+    "training": "acc_diploma",
+    "feeding_check": "acc_bowl",
+    "eye_nose_check": "acc_glasses",
+    "social": "acc_friendship",
+}
+
 
 def _require_owned_mission(mission_id: int, current_user: models.User, db: Session) -> models.DailyMission:
     """Return the mission only if it exists and its pet belongs to the caller."""
@@ -197,15 +217,16 @@ def complete_mission(
     if is_completed:
         # Rewards are append-only: undoing a mission does not remove an item
         # the owner has already earned. The unique key makes retries safe.
-        accessory_id = f"mission-{mission.id}"
-        exists = db.query(models.PetWardrobeItem).filter_by(
-            pet_id=mission.pet_id, accessory_id=accessory_id
-        ).first()
-        if not exists:
-            db.add(models.PetWardrobeItem(
-                pet_id=mission.pet_id,
-                accessory_id=accessory_id,
-            ))
+        accessory_id = _MISSION_ACCESSORY_MAP.get(mission.mission_type)
+        if accessory_id is not None:
+            exists = db.query(models.PetWardrobeItem).filter_by(
+                pet_id=mission.pet_id, accessory_id=accessory_id
+            ).first()
+            if not exists:
+                db.add(models.PetWardrobeItem(
+                    pet_id=mission.pet_id,
+                    accessory_id=accessory_id,
+                ))
     db.commit()
     db.refresh(mission)
     return mission

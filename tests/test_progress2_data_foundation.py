@@ -64,7 +64,7 @@ def test_completed_mission_unlocks_persistent_wardrobe_item(auth_client, pet, db
     assert auth_client.put(f"/api/v1/missions/{mission.id}/complete").status_code == 200
     items = auth_client.get(f"/api/v1/pets/{pet.id}/wardrobe-items").json()
     assert len(items) == 1
-    assert items[0]["accessory_id"] == f"mission-{mission.id}"
+    assert items[0]["accessory_id"] == "acc_brush"
 
     equipped = auth_client.put(
         f"/api/v1/pets/{pet.id}/wardrobe-items/{items[0]['accessory_id']}/equip"

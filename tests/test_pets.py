@@ -15,6 +15,9 @@ def test_create_pet(auth_client, user):
     assert data["species"] == "Dog"
     # blood_type used to be silently dropped (no column) - must round-trip now.
     assert data["blood_type"] == "A"
+    wardrobe = auth_client.get(f"/api/v1/pets/{data['id']}/wardrobe-items")
+    assert wardrobe.status_code == 200
+    assert [item["accessory_id"] for item in wardrobe.json()] == ["acc_collar"]
 
 
 def test_get_pet_not_found(auth_client):

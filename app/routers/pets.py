@@ -20,6 +20,8 @@ def create_pet(
 ):
     db_pet = models.Pet(user_id=current_user.id, **pet.model_dump())
     db.add(db_pet)
+    db.flush()
+    db.add(models.PetWardrobeItem(pet_id=db_pet.id, accessory_id="acc_collar"))
     db.commit()
     db.refresh(db_pet)
     return db_pet
