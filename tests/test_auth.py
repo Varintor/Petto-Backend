@@ -11,7 +11,11 @@ class _FakeAuthResp:
     """Mimics the Supabase auth response (.user.id, .session.access_token)."""
     def __init__(self, uid="uid-new", token="access-token-123", metadata=None):
         self.user = type("U", (), {"id": uid, "user_metadata": metadata or {}})()
-        self.session = type("S", (), {"access_token": token})()
+        self.session = type("S", (), {
+            "access_token": token,
+            "refresh_token": "refresh-token-123",
+            "expires_at": 1_800_000_000,
+        })()
 
 
 # ---- UTC-01: register ----
@@ -23,6 +27,7 @@ def test_register_success(client, monkeypatch):
     data = r.json()
     assert data["user"]["email"] == "new@test.com"
     assert data["access_token"] == "access-token-123"
+    assert data["refresh_token"] == "refresh-token-123"
 
 
 def test_register_duplicate_email(client, db, monkeypatch):
@@ -43,16 +48,16 @@ def test_forgot_password_requests_recovery_without_revealing_account(client, mon
     requested = []
     monkeypatch.setattr(
         "app.routers.auth.request_password_reset",
-        lambda email: requested.append(email),
+        lambda email, redirect_to=None: requested.append((email, redirect_to)),
     )
 
     response = client.post(
         "/api/v1/auth/forgot-password",
-        json={"email": "Owner@Test.com "},
+        json={"email": "Owner@Test.com ", "redirect_to": "petto://reset-password"},
     )
 
     assert response.status_code == 200
-    assert requested == ["owner@test.com"]
+    assert requested == [("owner@test.com", "petto://reset-password")]
     assert response.json()["message"] == (
         "If an account exists for this email, a reset link has been sent."
     )
@@ -61,11 +66,23 @@ def test_forgot_password_requests_recovery_without_revealing_account(client, mon
 def test_forgot_password_rejects_invalid_email(client, monkeypatch):
     monkeypatch.setattr(
         "app.routers.auth.request_password_reset",
-        lambda email: (_ for _ in ()).throw(AssertionError("must not send")),
+        lambda email, redirect_to=None: (_ for _ in ()).throw(AssertionError("must not send")),
     )
     response = client.post(
         "/api/v1/auth/forgot-password",
         json={"email": "not-an-email"},
+    )
+    assert response.status_code == 422
+
+
+def test_forgot_password_rejects_untrusted_redirect(client, monkeypatch):
+    monkeypatch.setattr(
+        "app.routers.auth.request_password_reset",
+        lambda email, redirect_to=None: (_ for _ in ()).throw(AssertionError("must not send")),
+    )
+    response = client.post(
+        "/api/v1/auth/forgot-password",
+        json={"email": "owner@test.com", "redirect_to": "https://attacker.test/reset"},
     )
     assert response.status_code == 422
 
@@ -75,7 +92,7 @@ def test_password_reset_hides_provider_account_disclosure_errors(monkeypatch):
         "FakeAuth",
         (),
         {
-            "reset_password_for_email": lambda self, email: (_ for _ in ()).throw(
+            "reset_password_for_email": lambda self, email, options=None: (_ for _ in ()).throw(
                 AuthApiError("invalid address", 400, "email_address_invalid")
             )
         },
@@ -90,7 +107,7 @@ def test_password_reset_reports_provider_outage(monkeypatch):
         "FakeAuth",
         (),
         {
-            "reset_password_for_email": lambda self, email: (_ for _ in ()).throw(
+            "reset_password_for_email": lambda self, email, options=None: (_ for _ in ()).throw(
                 AuthApiError("mail service unavailable", 500, "unexpected_failure")
             )
         },

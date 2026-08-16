@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, ConfigDict, EmailStr
 from datetime import datetime, date
 from typing import Optional, List
 from app.models import RiskLevel
@@ -22,17 +22,18 @@ class LoginRequest(BaseModel):
     password: str
 
 class UserResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     email: str
     name: Optional[str] = None
     avatar_uri: Optional[str] = None
     role: str = "owner"
 
-    class Config:
-        from_attributes = True
-
 class AuthResponse(BaseModel):
     access_token: str
+    refresh_token: Optional[str] = None
+    expires_at: Optional[int] = None
     token_type: str = "bearer"
     user: UserResponse
     # Populated when the register call also created a pet atomically.
@@ -43,6 +44,8 @@ class AuthResponse(BaseModel):
 # ==========================================
 
 class AssessmentResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     pet_id: int
     symptom_description: str
@@ -52,9 +55,6 @@ class AssessmentResponse(BaseModel):
     status: str
     error_code: Optional[str] = None
     created_at: datetime
-
-    class Config:
-        from_attributes = True
 
 # ==========================================
 # Feature 1: Pet Profile
@@ -81,6 +81,8 @@ class PetUpdate(BaseModel):
     avatar_uri: Optional[str] = None
 
 class PetResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     user_id: int
     name: str
@@ -93,9 +95,6 @@ class PetResponse(BaseModel):
     avatar_uri: Optional[str] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
-
-    class Config:
-        from_attributes = True
 
 
 # Resolve the forward references that RegisterRequest / AuthResponse hold to
@@ -117,6 +116,8 @@ class VaccinationCreate(BaseModel):
     notes: Optional[str] = None
 
 class VaccinationResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     pet_id: int
     vaccine_name: str
@@ -125,6 +126,3 @@ class VaccinationResponse(BaseModel):
     clinic_name: Optional[str] = None
     notes: Optional[str] = None
     created_at: datetime
-
-    class Config:
-        from_attributes = True

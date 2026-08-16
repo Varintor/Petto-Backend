@@ -1,3 +1,6 @@
+import os
+from urllib.parse import urlparse
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
@@ -24,6 +27,7 @@ class EmailCheckResponse(BaseModel):
 
 class PasswordResetRequest(BaseModel):
     email: str
+    redirect_to: str | None = None
 
 
 class PasswordResetResponse(BaseModel):
@@ -39,6 +43,35 @@ def _actor_response(actor: models.User | models.Veterinarian) -> schemas.UserRes
         avatar_uri=actor.avatar_uri,
         role=role,
     )
+
+
+def _validated_password_reset_redirect(requested: str | None) -> str | None:
+    """Allow only configured recovery callbacks; never become an open redirect."""
+    default = os.getenv("PASSWORD_RESET_REDIRECT_URL", "petto://reset-password").strip()
+    candidate = (requested or default).strip()
+    if not candidate:
+        return None
+
+    configured = {
+        value.strip()
+        for value in os.getenv("PASSWORD_RESET_REDIRECT_URLS", "").split(",")
+        if value.strip()
+    }
+    if default:
+        configured.add(default)
+    if candidate in configured:
+        return candidate
+
+    parsed = urlparse(candidate)
+    app_env = os.getenv("APP_ENV", "development").lower()
+    is_local_web = (
+        parsed.scheme in {"http", "https"}
+        and parsed.hostname in {"localhost", "127.0.0.1"}
+        and app_env != "production"
+    )
+    if is_local_web:
+        return candidate
+    raise HTTPException(status_code=422, detail="Password reset redirect is not allowed")
 
 
 @router.get("/check-email", response_model=EmailCheckResponse)
@@ -73,7 +106,8 @@ def forgot_password(req: PasswordResetRequest):
     email = req.email.lower().strip()
     if not email or "@" not in email:
         raise HTTPException(status_code=422, detail="Enter a valid email address")
-    request_password_reset(email)
+    redirect_to = _validated_password_reset_redirect(req.redirect_to)
+    request_password_reset(email, redirect_to)
     return PasswordResetResponse(
         message="If an account exists for this email, a reset link has been sent."
     )
@@ -92,7 +126,8 @@ def register(req: schemas.RegisterRequest, db: Session = Depends(get_db)):
     try:
         response = register_user(email, req.password)
         supabase_uid = response.user.id
-        access_token = response.session.access_token if response.session else ""
+        auth_session = response.session
+        access_token = auth_session.access_token if auth_session else ""
     except HTTPException:
         raise
     except Exception:
@@ -101,14 +136,16 @@ def register(req: schemas.RegisterRequest, db: Session = Depends(get_db)):
         # 500-ing, so the account becomes usable.
         login_resp = login_user(email, req.password)
         supabase_uid = login_resp.user.id
-        access_token = login_resp.session.access_token
+        auth_session = login_resp.session
+        access_token = auth_session.access_token
 
     # sign_up may not return a session (e.g. confirmation flow). Get one via
     # sign_in so the client always receives a usable token for the immediate
     # create-pet call that follows registration.
     if not access_token:
         login_resp = login_user(email, req.password)
-        access_token = login_resp.session.access_token
+        auth_session = login_resp.session
+        access_token = auth_session.access_token
 
     # Atomic write: user + pet land in the same DB transaction. If the pet
     # insert fails (validation, FK, constraint, whatever) we rollback the user
@@ -150,6 +187,8 @@ def register(req: schemas.RegisterRequest, db: Session = Depends(get_db)):
 
     return schemas.AuthResponse(
         access_token=access_token,
+        refresh_token=getattr(auth_session, "refresh_token", None),
+        expires_at=getattr(auth_session, "expires_at", None),
         user=_actor_response(user),
         pet=schemas.PetResponse.model_validate(created_pet) if created_pet else None,
     )
@@ -180,6 +219,8 @@ def login(req: schemas.LoginRequest, db: Session = Depends(get_db)):
                 db.refresh(veterinarian)
             return schemas.AuthResponse(
                 access_token=response.session.access_token,
+                refresh_token=getattr(response.session, "refresh_token", None),
+                expires_at=getattr(response.session, "expires_at", None),
                 user=_actor_response(veterinarian),
             )
 
@@ -204,6 +245,8 @@ def login(req: schemas.LoginRequest, db: Session = Depends(get_db)):
 
     return schemas.AuthResponse(
         access_token=response.session.access_token,
+        refresh_token=getattr(response.session, "refresh_token", None),
+        expires_at=getattr(response.session, "expires_at", None),
         user=_actor_response(user),
     )
 

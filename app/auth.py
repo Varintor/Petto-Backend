@@ -50,12 +50,13 @@ def login_user(email: str, password: str):
     return response
 
 
-def request_password_reset(email: str):
+def request_password_reset(email: str, redirect_to: str | None = None):
     """Ask Supabase Auth to send its recovery email without exposing keys."""
     if supabase is None:
         raise HTTPException(status_code=503, detail="Password reset is temporarily unavailable")
     try:
-        return supabase.auth.reset_password_for_email(email)
+        options = {"redirect_to": redirect_to} if redirect_to else None
+        return supabase.auth.reset_password_for_email(email, options)
     except Exception as exc:
         # Supabase can reject an otherwise syntactically valid address (for
         # example a reserved domain) or report that no matching user exists.

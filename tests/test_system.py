@@ -93,4 +93,4 @@ def test_production_rejects_wildcard_cors():
 
 
 def test_repository_expected_revision_is_current_head():
-    assert expected_database_revisions() == ("0013_wardrobe_reward_ids",)
+    assert expected_database_revisions() == ("0014_chat_realtime",)
