@@ -56,7 +56,16 @@ def request_password_reset(email: str):
         raise HTTPException(status_code=503, detail="Password reset is temporarily unavailable")
     try:
         return supabase.auth.reset_password_for_email(email)
-    except Exception:
+    except Exception as exc:
+        # Supabase can reject an otherwise syntactically valid address (for
+        # example a reserved domain) or report that no matching user exists.
+        # Treat those cases like a successful request so this endpoint cannot
+        # be used to enumerate registered accounts.
+        if getattr(exc, "code", None) in {
+            "email_address_invalid",
+            "user_not_found",
+        }:
+            return None
         raise HTTPException(status_code=503, detail="Password reset is temporarily unavailable")
 
 

@@ -1,7 +1,10 @@
 # -*- coding: utf-8 -*-
 """UTC-01 / UTC-02: Authentication module (register, login)."""
 from fastapi import HTTPException
+from supabase_auth.errors import AuthApiError
+
 from app import models
+from app.auth import request_password_reset
 
 
 class _FakeAuthResp:
@@ -65,6 +68,41 @@ def test_forgot_password_rejects_invalid_email(client, monkeypatch):
         json={"email": "not-an-email"},
     )
     assert response.status_code == 422
+
+
+def test_password_reset_hides_provider_account_disclosure_errors(monkeypatch):
+    fake_auth = type(
+        "FakeAuth",
+        (),
+        {
+            "reset_password_for_email": lambda self, email: (_ for _ in ()).throw(
+                AuthApiError("invalid address", 400, "email_address_invalid")
+            )
+        },
+    )()
+    monkeypatch.setattr("app.auth.supabase", type("FakeClient", (), {"auth": fake_auth})())
+
+    assert request_password_reset("reserved@example.com") is None
+
+
+def test_password_reset_reports_provider_outage(monkeypatch):
+    fake_auth = type(
+        "FakeAuth",
+        (),
+        {
+            "reset_password_for_email": lambda self, email: (_ for _ in ()).throw(
+                AuthApiError("mail service unavailable", 500, "unexpected_failure")
+            )
+        },
+    )()
+    monkeypatch.setattr("app.auth.supabase", type("FakeClient", (), {"auth": fake_auth})())
+
+    try:
+        request_password_reset("owner@petto.test")
+    except HTTPException as exc:
+        assert exc.status_code == 503
+    else:
+        raise AssertionError("provider outages must remain observable")
 
 
 # ---- UTC-02: login ----
