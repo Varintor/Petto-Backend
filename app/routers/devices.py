@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app import models
@@ -26,8 +26,8 @@ router = APIRouter(prefix="/api/v1", tags=["Tracking Devices"])
 # Schemas
 # ==========================================
 class DevicePair(BaseModel):
-    name: str
-    identifier: str                 # MAC address / serial
+    name: str = Field(min_length=1, max_length=120)
+    identifier: str = Field(min_length=3, max_length=120)  # MAC address / serial
     device_type: str = "ble_collar"
 
 
@@ -49,19 +49,19 @@ class DeviceResponse(BaseModel):
 
 
 class TelemetrySample(BaseModel):
-    lat: float
-    lng: float
-    speed_kmh: Optional[float] = None
+    lat: float = Field(ge=-90, le=90)
+    lng: float = Field(ge=-180, le=180)
+    speed_kmh: Optional[float] = Field(default=None, ge=0, le=500)
     recorded_at: Optional[datetime] = None
 
 
 class TelemetryBatch(BaseModel):
     samples: List[TelemetrySample]
-    battery_percent: Optional[int] = None
+    battery_percent: Optional[int] = Field(default=None, ge=0, le=100)
     # When the collar reports a finished movement session, the aggregates are
     # written to activity_logs (source='device') so stats/missions see them.
-    session_duration_minutes: Optional[float] = None
-    session_distance_meters: Optional[float] = None
+    session_duration_minutes: Optional[float] = Field(default=None, ge=0)
+    session_distance_meters: Optional[float] = Field(default=None, ge=0)
 
 
 class TelemetryResult(BaseModel):

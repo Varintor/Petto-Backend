@@ -183,3 +183,18 @@ def test_telemetry_flags_abnormal_speed(auth_client, pet):
     assert r.status_code == 200
     kinds = [a["kind"] for a in r.json()["anomalies"]]
     assert "abnormal_speed" in kinds
+
+
+def test_telemetry_rejects_invalid_coordinates_and_battery(auth_client, pet):
+    device = auth_client.post(
+        f"/api/v1/pets/{pet.id}/devices",
+        json={"name": "Collar", "identifier": "AA:BB:CC:04"},
+    ).json()
+    response = auth_client.post(
+        f"/api/v1/devices/{device['id']}/telemetry",
+        json={
+            "samples": [{"lat": 181, "lng": 98.98, "speed_kmh": -1}],
+            "battery_percent": 101,
+        },
+    )
+    assert response.status_code == 422
