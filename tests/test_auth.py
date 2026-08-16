@@ -36,6 +36,37 @@ def test_register_duplicate_email(client, db, monkeypatch):
     assert r.json()["detail"] == "Email already registered"
 
 
+def test_forgot_password_requests_recovery_without_revealing_account(client, monkeypatch):
+    requested = []
+    monkeypatch.setattr(
+        "app.routers.auth.request_password_reset",
+        lambda email: requested.append(email),
+    )
+
+    response = client.post(
+        "/api/v1/auth/forgot-password",
+        json={"email": "Owner@Test.com "},
+    )
+
+    assert response.status_code == 200
+    assert requested == ["owner@test.com"]
+    assert response.json()["message"] == (
+        "If an account exists for this email, a reset link has been sent."
+    )
+
+
+def test_forgot_password_rejects_invalid_email(client, monkeypatch):
+    monkeypatch.setattr(
+        "app.routers.auth.request_password_reset",
+        lambda email: (_ for _ in ()).throw(AssertionError("must not send")),
+    )
+    response = client.post(
+        "/api/v1/auth/forgot-password",
+        json={"email": "not-an-email"},
+    )
+    assert response.status_code == 422
+
+
 # ---- UTC-02: login ----
 def test_login_success(client, db, monkeypatch):
     db.add(models.User(email="user@test.com", name="U", supabase_uid="uid-1"))

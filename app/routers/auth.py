@@ -4,7 +4,12 @@ from pydantic import BaseModel
 
 from app import models, schemas
 from app.database import get_db
-from app.auth import register_user, login_user, get_supabase_uid
+from app.auth import (
+    register_user,
+    login_user,
+    request_password_reset,
+    get_supabase_uid,
+)
 
 router = APIRouter(
     prefix="/api/v1/auth",
@@ -14,6 +19,14 @@ router = APIRouter(
 
 class EmailCheckResponse(BaseModel):
     available: bool
+    message: str
+
+
+class PasswordResetRequest(BaseModel):
+    email: str
+
+
+class PasswordResetResponse(BaseModel):
     message: str
 
 
@@ -51,6 +64,18 @@ def check_email_availability(email: str = Query(..., description="Email to check
     return EmailCheckResponse(
         available=True,
         message="Email is available"
+    )
+
+
+@router.post("/forgot-password", response_model=PasswordResetResponse)
+def forgot_password(req: PasswordResetRequest):
+    """Send a recovery email while returning the same text for every address."""
+    email = req.email.lower().strip()
+    if not email or "@" not in email:
+        raise HTTPException(status_code=422, detail="Enter a valid email address")
+    request_password_reset(email)
+    return PasswordResetResponse(
+        message="If an account exists for this email, a reset link has been sent."
     )
 
 
