@@ -3,7 +3,7 @@ from sqlalchemy import Integer, func
 from sqlalchemy.orm import Session
 from typing import List
 from datetime import datetime
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from app import models
 from app.database import get_db
@@ -39,6 +39,8 @@ class ActivityCreate(BaseModel):
     ended_at: datetime | None = None
 
 class ActivityResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     pet_id: int
     mission_id: int | None = None
@@ -55,8 +57,6 @@ class ActivityResponse(BaseModel):
     ended_at: datetime | None = None
     created_at: datetime
 
-    class Config:
-        from_attributes = True
 
 class ActivityStatsResponse(BaseModel):
     total_activities: int

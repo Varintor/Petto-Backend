@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from typing import List, Optional
 from datetime import datetime, date
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from app import models
 from app.database import get_db
@@ -32,6 +32,8 @@ class MissionCreate(BaseModel):
 
 
 class MissionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     pet_id: int
     mission_date: date
@@ -44,8 +46,6 @@ class MissionResponse(BaseModel):
     completed_at: Optional[datetime] = None
     created_at: datetime
 
-    class Config:
-        from_attributes = True
 
 
 # Core missions (always included daily)

@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 from datetime import date, datetime, timedelta
 from typing import Dict, Any
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from app import models
 from app.database import get_db
@@ -21,6 +21,8 @@ router = APIRouter(
 # ==========================================
 
 class DashboardStatsResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     health_score: int
     activities_this_month: int
     total_duration_minutes: float
@@ -32,8 +34,6 @@ class DashboardStatsResponse(BaseModel):
     missions_completed_this_week: int
     mission_streak: int
 
-    class Config:
-        from_attributes = True
 
 
 class HealthScoreBreakdown(BaseModel):

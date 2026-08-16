@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
 from app import models
@@ -32,6 +32,8 @@ class DevicePair(BaseModel):
 
 
 class DeviceResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     pet_id: int
     name: str
@@ -44,8 +46,6 @@ class DeviceResponse(BaseModel):
     last_seen_at: Optional[datetime] = None
     paired_at: Optional[datetime] = None
 
-    class Config:
-        from_attributes = True
 
 
 class TelemetrySample(BaseModel):
