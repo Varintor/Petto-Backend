@@ -218,6 +218,32 @@ def list_shared_health_cards(
     ).order_by(models.ConsultationSharedHealthCard.shared_at.desc()).all()
 
 
+@router.delete(
+    "/consultations/{consultation_id}/shared-health-cards/{shared_card_id}",
+    status_code=204,
+)
+def revoke_shared_health_card(
+    consultation_id: int,
+    shared_card_id: int,
+    db: Session = Depends(get_db),
+    actor: AuthenticatedActor = Depends(get_current_actor),
+):
+    """Let the pet owner stop future access to a shared health-card snapshot."""
+    _participant_consultation(consultation_id, actor, db)
+    if actor.role != "owner":
+        raise HTTPException(status_code=403, detail="Only the pet owner can revoke a health card")
+    shared = db.query(models.ConsultationSharedHealthCard).filter_by(
+        id=shared_card_id,
+        consultation_id=consultation_id,
+        shared_by_user_id=actor.user.id,
+        revoked_at=None,
+    ).first()
+    if not shared:
+        raise HTTPException(status_code=404, detail="Shared health card not found")
+    shared.revoked_at = datetime.now(tz=BANGKOK_TZ)
+    db.commit()
+
+
 @router.get("/pets/{pet_id}/history", response_model=HistoryResponse)
 def get_pet_history(
     pet_id: int,

@@ -216,3 +216,60 @@ def test_vet_proposes_and_owner_accepts_appointment_into_calendar(
         f"/api/v1/consultations/{consultation_id}/appointments"
     ).json()
     assert answered[0]["status"] == "accepted"
+
+
+def test_owner_controls_health_card_shared_with_assigned_vet(
+    auth_client, pet, approved_vet, db
+):
+    outsider = models.Veterinarian(
+        supabase_uid="uid-outsider-vet",
+        email="outsider-vet@test.com",
+        name="Dr. Outsider",
+        verification_status="approved",
+        is_accepting_consultations=True,
+    )
+    db.add(outsider)
+    db.commit()
+
+    consultation = auth_client.post(
+        "/api/v1/consultations",
+        json={"pet_id": pet.id, "vet_id": approved_vet.id},
+    )
+    assert consultation.status_code == 200, consultation.text
+    consultation_id = consultation.json()["id"]
+
+    shared = auth_client.post(
+        f"/api/v1/consultations/{consultation_id}/shared-health-cards"
+    )
+    assert shared.status_code == 200, shared.text
+    shared_id = shared.json()["id"]
+    assert shared.json()["snapshot"]["pet_id"] == pet.id
+
+    app.dependency_overrides[get_current_actor] = lambda: AuthenticatedActor(
+        role="vet", veterinarian=approved_vet
+    )
+    assigned_view = auth_client.get(
+        f"/api/v1/consultations/{consultation_id}/shared-health-cards"
+    )
+    assert assigned_view.status_code == 200
+    assert [item["id"] for item in assigned_view.json()] == [shared_id]
+    vet_share_attempt = auth_client.post(
+        f"/api/v1/consultations/{consultation_id}/shared-health-cards"
+    )
+    assert vet_share_attempt.status_code == 403
+
+    app.dependency_overrides[get_current_actor] = lambda: AuthenticatedActor(
+        role="vet", veterinarian=outsider
+    )
+    assert auth_client.get(
+        f"/api/v1/consultations/{consultation_id}/shared-health-cards"
+    ).status_code == 404
+
+    app.dependency_overrides.pop(get_current_actor, None)
+    revoked = auth_client.delete(
+        f"/api/v1/consultations/{consultation_id}/shared-health-cards/{shared_id}"
+    )
+    assert revoked.status_code == 204
+    assert auth_client.get(
+        f"/api/v1/consultations/{consultation_id}/shared-health-cards"
+    ).json() == []
