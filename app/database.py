@@ -27,7 +27,11 @@ def _uses_transaction_pooler(database_url: str) -> bool:
 if DATABASE_URL.startswith("sqlite"):
     _engine_kwargs = {}
 elif _uses_transaction_pooler(DATABASE_URL):
-    _engine_kwargs = {"poolclass": NullPool, "pool_pre_ping": True}
+    _engine_kwargs = {
+        "poolclass": NullPool,
+        "pool_pre_ping": True,
+        "use_native_hstore": False,
+    }
 else:
     _engine_kwargs = {
         "pool_pre_ping": True,
@@ -35,6 +39,7 @@ else:
         "max_overflow": 20,
         "pool_timeout": 30,
         "pool_recycle": 1800,
+        "use_native_hstore": False,
     }
 
 engine = create_engine(DATABASE_URL, **_engine_kwargs)
