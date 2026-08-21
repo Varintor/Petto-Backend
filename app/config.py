@@ -39,6 +39,48 @@ def _has_valid_database_url(value: str | None) -> bool:
     return _has_valid_url(value, schemes={"postgres", "postgresql"})
 
 
+def _validate_supabase_pooler_url(
+    name: str, value: str, errors: list[str]
+) -> None:
+    """Validate the non-secret parts of a managed Supavisor URL."""
+    parsed = urlparse(value)
+    hostname = (parsed.hostname or "").lower()
+    if not hostname.endswith(".pooler.supabase.com"):
+        return
+
+    if parsed.port not in {5432, 6543}:
+        errors.append(f"{name} Supabase pooler port must be 5432 or 6543")
+
+    username = parsed.username or ""
+    if "." not in username:
+        errors.append(
+            f"{name} Supabase pooler username must include the project reference"
+        )
+
+
+def _validate_pool_settings(
+    source: Mapping[str, str], errors: list[str]
+) -> None:
+    limits = {
+        "DB_POOL_SIZE": (1, 20),
+        "DB_MAX_OVERFLOW": (0, 20),
+        "DB_POOL_TIMEOUT_SECONDS": (1, 120),
+        "DB_POOL_RECYCLE_SECONDS": (30, 3600),
+        "DB_CONNECT_TIMEOUT_SECONDS": (1, 60),
+    }
+    for name, (minimum, maximum) in limits.items():
+        raw = source.get(name)
+        if raw is None or not raw.strip():
+            continue
+        try:
+            value = int(raw)
+        except ValueError:
+            errors.append(f"{name} must be an integer")
+            continue
+        if not minimum <= value <= maximum:
+            errors.append(f"{name} must be between {minimum} and {maximum}")
+
+
 def validate_environment(
     environ: Mapping[str, str] | None = None,
     *,
@@ -65,6 +107,10 @@ def validate_environment(
         errors.append("DATABASE_URL is required")
     elif not _has_valid_database_url(database_url):
         errors.append("DATABASE_URL must be a valid PostgreSQL or SQLite URL")
+    elif not database_url.startswith("sqlite:"):
+        _validate_supabase_pooler_url("DATABASE_URL", database_url, errors)
+
+    _validate_pool_settings(source, errors)
 
     if app_env in DEPLOYED_ENVIRONMENTS:
         required = ("SUPABASE_URL", "SUPABASE_KEY", "GEMINI_API_KEY")
@@ -96,10 +142,14 @@ def validate_environment(
         elif migration_url:
             if not _has_valid_url(migration_url, schemes={"postgres", "postgresql"}):
                 errors.append("MIGRATION_DATABASE_URL must be a valid PostgreSQL URL")
-            elif urlparse(migration_url).port == 6543:
-                errors.append(
-                    "MIGRATION_DATABASE_URL must use a direct or session-pooler connection, not transaction-pooler port 6543"
+            else:
+                _validate_supabase_pooler_url(
+                    "MIGRATION_DATABASE_URL", migration_url, errors
                 )
+                if urlparse(migration_url).port == 6543:
+                    errors.append(
+                        "MIGRATION_DATABASE_URL must use a direct or session-pooler connection, not transaction-pooler port 6543"
+                    )
 
     if errors:
         raise EnvironmentValidationError("; ".join(errors))

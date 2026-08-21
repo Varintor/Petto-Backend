@@ -2,6 +2,8 @@ import os
 from fastapi import FastAPI, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from sqlalchemy.exc import OperationalError as SQLAlchemyOperationalError
+from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 from sqlalchemy.orm import Session
 from app.database import SessionLocal, get_db
 from app import models
@@ -28,6 +30,24 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(SQLAlchemyTimeoutError)
+@app.exception_handler(SQLAlchemyOperationalError)
+async def database_pool_timeout_handler(
+    request: Request, exc: SQLAlchemyTimeoutError | SQLAlchemyOperationalError
+):
+    """Return a retryable response when the database is temporarily unavailable."""
+    import logging
+
+    logging.getLogger("petto.database").warning(
+        "Database pool timeout on %s %s", request.method, request.url.path
+    )
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "Database is busy. Please retry shortly."},
+        headers={"Retry-After": "1"},
+    )
 
 
 @app.exception_handler(Exception)

@@ -1,6 +1,11 @@
 """Deployment-safety tests for environment checks and readiness probes."""
 
+import asyncio
+import json
+
 import pytest
+from sqlalchemy.exc import OperationalError as SQLAlchemyOperationalError
+from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 
 import app.main as main_module
 from app.config import EnvironmentValidationError, validate_environment
@@ -94,3 +99,47 @@ def test_production_rejects_wildcard_cors():
 
 def test_repository_expected_revision_is_current_head():
     assert expected_database_revisions() == ("0014_chat_realtime",)
+
+
+def test_database_pool_timeout_returns_retryable_503():
+    request = type(
+        "RequestStub",
+        (),
+        {
+            "method": "GET",
+            "url": type("UrlStub", (), {"path": "/api/v1/consultations"})(),
+        },
+    )()
+
+    response = asyncio.run(
+        main_module.database_pool_timeout_handler(
+            request, SQLAlchemyTimeoutError("pool exhausted")
+        )
+    )
+
+    assert response.status_code == 503
+    assert response.headers["retry-after"] == "1"
+    assert json.loads(response.body)["detail"] == (
+        "Database is busy. Please retry shortly."
+    )
+
+
+def test_database_connection_failure_returns_retryable_503():
+    request = type(
+        "RequestStub",
+        (),
+        {
+            "method": "GET",
+            "url": type("UrlStub", (), {"path": "/api/v1/pets"})(),
+        },
+    )()
+
+    response = asyncio.run(
+        main_module.database_pool_timeout_handler(
+            request,
+            SQLAlchemyOperationalError("connect", {}, Exception("unavailable")),
+        )
+    )
+
+    assert response.status_code == 503
+    assert response.headers["retry-after"] == "1"

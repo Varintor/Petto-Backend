@@ -15,6 +15,21 @@ Railway uses `python -m app.predeploy` before releasing a deployment. The comman
 | `ALLOWED_ORIGINS` | recommended | required | Comma-separated frontend origins; wildcard is rejected in production |
 | `ENABLE_MOCK_DATA` | `false` | `false` | Public mock-data route must remain disabled |
 
+### Database connection pool
+
+| Variable | Recommended | Purpose |
+| --- | --- | --- |
+| `DB_POOL_SIZE` | `3` | Persistent connections per worker in direct/session mode |
+| `DB_MAX_OVERFLOW` | `1` | Temporary burst connections per worker |
+| `DB_POOL_TIMEOUT_SECONDS` | `10` | Maximum wait for a pooled connection |
+| `DB_POOL_RECYCLE_SECONDS` | `300` | Recycle persistent connections before they become stale |
+| `DB_CONNECT_TIMEOUT_SECONDS` | `10` | Fail quickly when the database cannot be reached |
+
+Supabase pooler usernames must include the project reference, for example
+`postgres.<project-ref>`. Port `5432` is session mode and uses the bounded local
+pool. Port `6543` is transaction mode and delegates pooling to Supavisor. Pool
+limits apply per Uvicorn worker and per Railway replica.
+
 Never copy production data, database credentials, API keys, or Storage files into staging. Use synthetic test records only.
 
 ## Deployment checklist
