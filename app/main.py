@@ -1,3 +1,4 @@
+import asyncio
 import os
 from fastapi import FastAPI, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,6 +16,38 @@ from app.routers import (
 )
 
 app = FastAPI(title="Petto API", version="1.0.0")
+
+_assessment_read_limit = max(
+    1, int(os.getenv("ASSESSMENT_READ_CONCURRENCY", "2"))
+)
+_assessment_read_slots = asyncio.Semaphore(_assessment_read_limit)
+
+
+def _is_assessment_read(request: Request) -> bool:
+    return (
+        request.method == "GET"
+        and request.url.path.startswith("/api/v1/")
+        and "/assessments" in request.url.path
+    )
+
+
+@app.middleware("http")
+async def limit_assessment_read_bursts(request: Request, call_next):
+    """Keep duplicate history loads from starving unrelated API routes."""
+    if not _is_assessment_read(request):
+        return await call_next(request)
+    try:
+        await asyncio.wait_for(_assessment_read_slots.acquire(), timeout=0.1)
+    except TimeoutError:
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "Assessment history is busy. Please retry shortly."},
+            headers={"Retry-After": "1"},
+        )
+    try:
+        return await call_next(request)
+    finally:
+        _assessment_read_slots.release()
 
 # Production-safe rule: a wildcard origin ("*") and allow_credentials=True
 # cannot be combined — browsers reject it and Starlette refuses to echo "*"

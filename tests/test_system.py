@@ -124,6 +124,28 @@ def test_database_pool_timeout_returns_retryable_503():
     )
 
 
+def test_assessment_bulkhead_only_matches_assessment_gets():
+    def request(method: str, path: str):
+        return type(
+            "RequestStub",
+            (),
+            {
+                "method": method,
+                "url": type("UrlStub", (), {"path": path})(),
+            },
+        )()
+
+    assert main_module._is_assessment_read(
+        request("GET", "/api/v1/pets/8/assessments")
+    )
+    assert not main_module._is_assessment_read(
+        request("POST", "/api/v1/assessments")
+    )
+    assert not main_module._is_assessment_read(
+        request("GET", "/api/v1/consultations/2/messages")
+    )
+
+
 def test_database_connection_failure_returns_retryable_503():
     request = type(
         "RequestStub",
