@@ -189,7 +189,9 @@ def _require_participant(
     if not consultation:
         raise HTTPException(status_code=404, detail="Consultation not found")
     if actor.role == "owner":
-        pet = db.query(models.Pet).filter_by(id=consultation.pet_id).first()
+        # The participant query already eager-loads the pet. Reusing it avoids
+        # one extra round trip on every chat/messages/appointment request.
+        pet = consultation.pet
         allowed = bool(pet and pet.user_id == actor.user.id)
     else:
         allowed = consultation.vet_id == actor.veterinarian.id

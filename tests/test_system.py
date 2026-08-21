@@ -98,7 +98,7 @@ def test_production_rejects_wildcard_cors():
 
 
 def test_repository_expected_revision_is_current_head():
-    assert expected_database_revisions() == ("0014_chat_realtime",)
+    assert expected_database_revisions() == ("0015_chat_query_indexes",)
 
 
 def test_database_pool_timeout_returns_retryable_503():

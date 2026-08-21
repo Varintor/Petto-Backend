@@ -10,7 +10,7 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app import models
 from app.auth import AuthenticatedActor, get_current_actor, get_current_user, require_owned_pet
@@ -126,10 +126,15 @@ def _health_card(pet: models.Pet, db: Session) -> HealthCardDTO:
 def _participant_consultation(
     consultation_id: int, actor: AuthenticatedActor, db: Session
 ) -> models.Consultation:
-    consultation = db.query(models.Consultation).filter_by(id=consultation_id).first()
+    consultation = (
+        db.query(models.Consultation)
+        .options(joinedload(models.Consultation.pet))
+        .filter_by(id=consultation_id)
+        .first()
+    )
     if not consultation:
         raise HTTPException(status_code=404, detail="Consultation not found")
-    pet = db.query(models.Pet).filter_by(id=consultation.pet_id).first()
+    pet = consultation.pet
     owner_ok = actor.role == "owner" and pet and pet.user_id == actor.user.id
     vet_ok = actor.role == "vet" and consultation.vet_id == actor.veterinarian.id
     if not (owner_ok or vet_ok):
