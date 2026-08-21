@@ -3,17 +3,11 @@ import logging
 import os
 from typing import List
 from fastapi import APIRouter, Depends, File, UploadFile, Form, HTTPException
-from sqlalchemy.orm import Session
 from google import genai
 
 from app import models, schemas
-from app.auth import (
-    SupabaseAuthContext,
-    get_current_user,
-    get_supabase_auth_context,
-    require_owned_pet,
-)
-from app.database import get_db, get_session_factory
+from app.auth import SupabaseAuthContext, get_supabase_auth_context, require_owned_pet
+from app.database import get_session_factory
 from app.storage import (
     StorageConfigurationError,
     assessment_object_path,
@@ -80,49 +74,70 @@ async def _run_blocking(callable_):
 
 @router.get("/assessments", response_model=List[schemas.AssessmentResponse])
 def get_my_assessments(
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
     auth_context: SupabaseAuthContext = Depends(get_supabase_auth_context),
+    session_factory=Depends(get_session_factory),
 ):
     """List all assessments across the caller's pets."""
-    assessments = db.query(models.HealthAssessment).join(
-        models.Pet, models.HealthAssessment.pet_id == models.Pet.id
-    ).filter(
-        models.Pet.user_id == current_user.id
-    ).order_by(models.HealthAssessment.created_at.desc()).all()
-    return [_assessment_response(a, auth_context.access_token) for a in assessments]
+    # Convert ORM rows to detached DTOs, then release the DB connection before
+    # contacting Storage to create signed image URLs.
+    with session_factory() as db:
+        current_user = db.query(models.User).filter(
+            models.User.supabase_uid == auth_context.supabase_uid
+        ).first()
+        if not current_user:
+            raise HTTPException(status_code=401, detail="User not found")
+        assessments = db.query(models.HealthAssessment).join(
+            models.Pet, models.HealthAssessment.pet_id == models.Pet.id
+        ).filter(
+            models.Pet.user_id == current_user.id
+        ).order_by(models.HealthAssessment.created_at.desc()).all()
+        payloads = [schemas.AssessmentResponse.model_validate(a) for a in assessments]
+    return [_assessment_response(item, auth_context.access_token) for item in payloads]
 
 
 @router.get("/assessments/{assessment_id}", response_model=schemas.AssessmentResponse)
 def get_assessment(
     assessment_id: int,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
     auth_context: SupabaseAuthContext = Depends(get_supabase_auth_context),
+    session_factory=Depends(get_session_factory),
 ):
     """Get a single assessment by ID (owner only)."""
-    assessment = db.query(models.HealthAssessment).filter(models.HealthAssessment.id == assessment_id).first()
-    if not assessment:
-        raise HTTPException(status_code=404, detail="Assessment not found")
-    require_owned_pet(assessment.pet_id, current_user, db)
-    return _assessment_response(assessment, auth_context.access_token)
+    with session_factory() as db:
+        current_user = db.query(models.User).filter(
+            models.User.supabase_uid == auth_context.supabase_uid
+        ).first()
+        if not current_user:
+            raise HTTPException(status_code=401, detail="User not found")
+        assessment = db.query(models.HealthAssessment).filter(
+            models.HealthAssessment.id == assessment_id
+        ).first()
+        if not assessment:
+            raise HTTPException(status_code=404, detail="Assessment not found")
+        require_owned_pet(assessment.pet_id, current_user, db)
+        payload = schemas.AssessmentResponse.model_validate(assessment)
+    return _assessment_response(payload, auth_context.access_token)
 
 
 @router.get("/pets/{pet_id}/assessments", response_model=List[schemas.AssessmentResponse])
 def get_pet_assessments(
     pet_id: int,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
     auth_context: SupabaseAuthContext = Depends(get_supabase_auth_context),
+    session_factory=Depends(get_session_factory),
 ):
     """List all assessments for a specific pet (owner only)."""
-    require_owned_pet(pet_id, current_user, db)
+    with session_factory() as db:
+        current_user = db.query(models.User).filter(
+            models.User.supabase_uid == auth_context.supabase_uid
+        ).first()
+        if not current_user:
+            raise HTTPException(status_code=401, detail="User not found")
+        require_owned_pet(pet_id, current_user, db)
+        assessments = db.query(models.HealthAssessment).filter(
+            models.HealthAssessment.pet_id == pet_id
+        ).order_by(models.HealthAssessment.created_at.desc()).all()
+        payloads = [schemas.AssessmentResponse.model_validate(a) for a in assessments]
 
-    assessments = db.query(models.HealthAssessment).filter(
-        models.HealthAssessment.pet_id == pet_id
-    ).order_by(models.HealthAssessment.created_at.desc()).all()
-
-    return [_assessment_response(a, auth_context.access_token) for a in assessments]
+    return [_assessment_response(item, auth_context.access_token) for item in payloads]
 
 
 # ==========================================
