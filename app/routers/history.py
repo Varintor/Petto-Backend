@@ -6,7 +6,7 @@ One unified, reverse-chronological timeline of everything recorded for a pet
 and later the vet - can review the health record in one place.
 """
 from datetime import datetime, date, time, timedelta
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
@@ -67,7 +67,14 @@ class HealthCardDTO(BaseModel):
     latest_assessment: HistoryEntry | None
     latest_vaccination: HistoryEntry | None
     recent_activity: HistoryEntry | None
+    profile_updated_at: datetime | None
     generated_at: datetime
+
+
+class HistoryDetailResponse(BaseModel):
+    type: str
+    ref_id: int
+    fields: dict[str, Any]
 
 
 class SharedHealthCardResponse(BaseModel):
@@ -119,6 +126,7 @@ def _health_card(pet: models.Pet, db: Session) -> HealthCardDTO:
         latest_assessment=assessment_entry,
         latest_vaccination=vaccination_entry,
         recent_activity=activity_entry,
+        profile_updated_at=profile.updated_at if profile else None,
         generated_at=datetime.now(tz=BANGKOK_TZ),
     )
 
@@ -344,3 +352,96 @@ def get_pet_history(
 
     entries.sort(key=lambda e: e.timestamp, reverse=True)
     return HistoryResponse(pet_id=pet_id, entries=entries[:limit])
+
+
+@router.get(
+    "/pets/{pet_id}/history/{record_type}/{record_id}",
+    response_model=HistoryDetailResponse,
+)
+def get_pet_history_detail(
+    pet_id: int,
+    record_type: str,
+    record_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Return the complete source fields for one owner-visible timeline row."""
+    require_owned_pet(pet_id, current_user, db)
+    if record_type not in VALID_TYPES:
+        raise HTTPException(status_code=404, detail="Health record not found")
+
+    model_by_type = {
+        "assessment": models.HealthAssessment,
+        "activity": models.ActivityLog,
+        "vaccination": models.Vaccination,
+        "mission": models.DailyMission,
+        "appointment": models.Appointment,
+    }
+    record = db.query(model_by_type[record_type]).filter_by(
+        id=record_id, pet_id=pet_id
+    ).first()
+    if not record:
+        raise HTTPException(status_code=404, detail="Health record not found")
+
+    if record_type == "assessment":
+        fields = {
+            "symptom_description": record.symptom_description,
+            "risk_level": record.risk_level.value if record.risk_level else None,
+            "ai_raw_response": record.ai_raw_response,
+            "status": record.status,
+            "error_code": record.error_code,
+            "image_uri": record.image_uri,
+            "created_at": record.created_at,
+        }
+    elif record_type == "activity":
+        fields = {
+            "activity_type": record.activity_type,
+            "source": record.source.value,
+            "duration_minutes": record.duration_minutes,
+            "distance_meters": record.distance_meters,
+            "calories_burned": record.calories_burned,
+            "avg_speed_kmh": record.avg_speed_kmh,
+            "max_speed_kmh": record.max_speed_kmh,
+            "steps": record.steps,
+            "notes": record.notes,
+            "started_at": record.started_at,
+            "ended_at": record.ended_at,
+            "created_at": record.created_at,
+        }
+    elif record_type == "vaccination":
+        fields = {
+            "vaccine_name": record.vaccine_name,
+            "date_administered": record.date_administered,
+            "next_due_date": record.next_due_date,
+            "clinic_name": record.clinic_name,
+            "notes": record.notes,
+            "created_at": record.created_at,
+        }
+    elif record_type == "mission":
+        fields = {
+            "mission_date": record.mission_date,
+            "title": record.title,
+            "mission_type": record.mission_type,
+            "target_value": record.target_value,
+            "unit": record.unit,
+            "reward": record.reward,
+            "is_completed": record.is_completed,
+            "completed_at": record.completed_at,
+            "created_at": record.created_at,
+        }
+    else:
+        fields = {
+            "starts_at": record.starts_at,
+            "ends_at": record.ends_at,
+            "reason": record.reason,
+            "status": record.status,
+            "provider_id": record.provider_id,
+            "responded_at": record.responded_at,
+            "created_at": record.created_at,
+            "updated_at": record.updated_at,
+        }
+    return HistoryDetailResponse(
+        type=record_type,
+        ref_id=record_id,
+        fields=fields,
+    )

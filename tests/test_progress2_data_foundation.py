@@ -101,6 +101,7 @@ def test_health_card_combines_profile_and_latest_records(auth_client, pet, db):
     body = card.json()
     assert body["name"] == pet.name
     assert body["allergies"] == ["Chicken"]
+    assert body["profile_updated_at"] == update.json()["updated_at"]
     assert body["latest_assessment"]["risk_level"] == "Moderate Risk"
     assert body["latest_vaccination"]["title"] == "Vaccination: Rabies"
 
@@ -117,6 +118,49 @@ def test_only_approved_accepting_vet_can_be_consulted(auth_client, pet, db):
         "/api/v1/consultations", json={"pet_id": pet.id, "vet_id": pending.id}
     )
     assert response.status_code == 404
+
+
+def test_assigned_vet_reads_only_active_shared_assessment_and_owner_revokes(
+    auth_client, pet, approved_vet, db
+):
+    assessment = models.HealthAssessment(
+        pet_id=pet.id,
+        symptom_description="Lethargic and not eating",
+        status="failed",
+        error_code="AI_TIMEOUT",
+    )
+    db.add(assessment)
+    db.commit()
+    db.refresh(assessment)
+    consultation = auth_client.post(
+        "/api/v1/consultations",
+        json={"pet_id": pet.id, "vet_id": approved_vet.id},
+    ).json()
+    shared = auth_client.post(
+        f"/api/v1/consultations/{consultation['id']}/shared-assessments",
+        json={"assessment_id": assessment.id},
+    )
+    assert shared.status_code == 200, shared.text
+
+    app.dependency_overrides[get_current_actor] = lambda: AuthenticatedActor(
+        role="vet", veterinarian=approved_vet
+    )
+    visible = auth_client.get(
+        f"/api/v1/consultations/{consultation['id']}/shared-assessments"
+    )
+    app.dependency_overrides.pop(get_current_actor, None)
+    assert visible.status_code == 200, visible.text
+    assert visible.json()[0]["assessment"]["status"] == "failed"
+    assert visible.json()[0]["assessment"]["risk_level"] is None
+    assert visible.json()[0]["assessment"]["error_code"] == "AI_TIMEOUT"
+
+    revoked = auth_client.delete(
+        f"/api/v1/consultations/{consultation['id']}/shared-assessments/{assessment.id}"
+    )
+    assert revoked.status_code == 204
+    assert auth_client.get(
+        f"/api/v1/consultations/{consultation['id']}/shared-assessments"
+    ).json() == []
 
 
 def test_provider_directory_exposes_only_available_verified_vets(
@@ -216,6 +260,60 @@ def test_vet_proposes_and_owner_accepts_appointment_into_calendar(
         f"/api/v1/consultations/{consultation_id}/appointments"
     ).json()
     assert answered[0]["status"] == "accepted"
+
+
+def test_reschedule_and_cancel_stay_synchronized_with_calendar(
+    auth_client, pet, approved_vet, db
+):
+    consultation = auth_client.post(
+        "/api/v1/consultations",
+        json={"pet_id": pet.id, "vet_id": approved_vet.id},
+    ).json()
+    app.dependency_overrides[get_current_actor] = lambda: AuthenticatedActor(
+        role="vet", veterinarian=approved_vet
+    )
+    starts_at = now_bkk() + timedelta(days=3)
+    proposed = auth_client.post(
+        f"/api/v1/consultations/{consultation['id']}/appointments",
+        json={"starts_at": starts_at.isoformat(), "reason": "Initial follow-up"},
+    )
+    app.dependency_overrides.pop(get_current_actor, None)
+    assert proposed.status_code == 200, proposed.text
+    appointment_id = proposed.json()["id"]
+
+    accepted = auth_client.put(
+        f"/api/v1/appointments/{appointment_id}/decision",
+        json={"decision": "accepted"},
+    )
+    assert accepted.status_code == 200, accepted.text
+
+    rescheduled_at = now_bkk() + timedelta(days=5)
+    app.dependency_overrides[get_current_actor] = lambda: AuthenticatedActor(
+        role="vet", veterinarian=approved_vet
+    )
+    rescheduled = auth_client.put(
+        f"/api/v1/appointments/{appointment_id}",
+        json={
+            "starts_at": rescheduled_at.isoformat(),
+            "reason": "Rescheduled follow-up",
+        },
+    )
+    app.dependency_overrides.pop(get_current_actor, None)
+    assert rescheduled.status_code == 200, rescheduled.text
+    assert rescheduled.json()["status"] == "accepted"
+    assert rescheduled.json()["reason"] == "Rescheduled follow-up"
+
+    events = auth_client.get(f"/api/v1/pets/{pet.id}/calendar-events").json()
+    assert len(events) == 1
+    assert events[0]["appointment_id"] == appointment_id
+    assert events[0]["event_date"] == rescheduled_at.date().isoformat()
+
+    cancelled = auth_client.put(f"/api/v1/appointments/{appointment_id}/cancel")
+    assert cancelled.status_code == 200, cancelled.text
+    assert cancelled.json()["status"] == "cancelled"
+    assert auth_client.get(
+        f"/api/v1/pets/{pet.id}/calendar-events"
+    ).json() == []
 
 
 def test_owner_controls_health_card_shared_with_assigned_vet(

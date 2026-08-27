@@ -78,6 +78,32 @@ def test_owner_can_chat_but_cannot_forge_vet(auth_client, consultation):
     assert forged.status_code == 403
 
 
+@pytest.mark.parametrize("status", ["COMPLETED", "CANCELLED"])
+def test_closed_consultation_rejects_new_messages(
+    auth_client, consultation, status
+):
+    cid = consultation["id"]
+    closed = auth_client.put(
+        f"/api/v1/consultations/{cid}/status",
+        json={"status": status},
+    )
+    assert closed.status_code == 200, closed.text
+
+    response = auth_client.post(
+        f"/api/v1/consultations/{cid}/messages",
+        json={"content": "This must not be stored"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "Messages cannot be sent to a closed consultation"
+    )
+    messages = auth_client.get(
+        f"/api/v1/consultations/{cid}/messages"
+    ).json()
+    assert messages == []
+
+
 def test_ai_summary_posts_ai_message(auth_client, consultation, pet, db):
     db.add(models.ActivityLog(pet_id=pet.id, activity_type="walking",
                               duration_minutes=20, distance_meters=1200))
@@ -128,6 +154,34 @@ def test_history_type_filter(auth_client, pet, db):
     assert r.status_code == 200
     assert all(e["type"] == "vaccination" for e in r.json()["entries"])
     assert len(r.json()["entries"]) == 1
+
+
+def test_history_detail_returns_complete_owned_source_record(
+    auth_client, pet, db
+):
+    vaccination = models.Vaccination(
+        pet_id=pet.id,
+        vaccine_name="Rabies",
+        date_administered=date(2026, 6, 1),
+        next_due_date=date(2027, 6, 1),
+        clinic_name="CMU Vet Clinic",
+        notes="Booster",
+    )
+    db.add(vaccination)
+    db.commit()
+    db.refresh(vaccination)
+
+    response = auth_client.get(
+        f"/api/v1/pets/{pet.id}/history/vaccination/{vaccination.id}"
+    )
+
+    assert response.status_code == 200, response.text
+    detail = response.json()
+    assert detail["type"] == "vaccination"
+    assert detail["fields"]["vaccine_name"] == "Rabies"
+    assert detail["fields"]["next_due_date"] == "2027-06-01"
+    assert detail["fields"]["clinic_name"] == "CMU Vet Clinic"
+    assert detail["fields"]["notes"] == "Booster"
 
 
 # ==========================================

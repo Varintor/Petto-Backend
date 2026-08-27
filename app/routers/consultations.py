@@ -10,9 +10,17 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
-from app import models
-from app.auth import AuthenticatedActor, get_current_actor, get_current_user, require_owned_pet
+from app import models, schemas
+from app.auth import (
+    AuthenticatedActor,
+    SupabaseAuthContext,
+    get_current_actor,
+    get_current_user,
+    get_supabase_auth_context,
+    require_owned_pet,
+)
 from app.database import get_db
+from app.storage import create_assessment_signed_url
 from app.utils.time import now_bkk
 
 router = APIRouter(prefix="/api/v1", tags=["Vet Consultation"])
@@ -130,6 +138,10 @@ class SharedAssessmentResponse(BaseModel):
     revoked_at: datetime | None
 
 
+class SharedAssessmentDetailResponse(SharedAssessmentResponse):
+    assessment: schemas.AssessmentResponse
+
+
 class AppointmentCreate(BaseModel):
     starts_at: datetime
     ends_at: datetime | None = None
@@ -138,6 +150,12 @@ class AppointmentCreate(BaseModel):
 
 class AppointmentDecision(BaseModel):
     decision: Literal["accepted", "declined"]
+
+
+class AppointmentUpdate(BaseModel):
+    starts_at: datetime | None = None
+    ends_at: datetime | None = None
+    reason: str | None = None
 
 
 class AppointmentResponse(BaseModel):
@@ -154,6 +172,31 @@ class AppointmentResponse(BaseModel):
     responded_at: datetime | None
     created_at: datetime
     updated_at: datetime
+
+
+def _sync_appointment_calendar(
+    appointment: models.Appointment, db: Session
+) -> None:
+    """Keep the accepted appointment and its Calendar projection atomic."""
+    event = db.query(models.CalendarEvent).filter_by(
+        appointment_id=appointment.id
+    ).first()
+    if appointment.status != "accepted":
+        if event is not None:
+            db.delete(event)
+        return
+    if event is None:
+        event = models.CalendarEvent(
+            pet_id=appointment.pet_id,
+            appointment_id=appointment.id,
+            title="Veterinary appointment",
+            event_type="vet",
+            reminder_minutes=30,
+        )
+        db.add(event)
+    event.event_date = appointment.starts_at.date()
+    event.starts_at = appointment.starts_at
+    event.updated_at = now_bkk()
 
 
 def _consultation_query(db: Session):
@@ -396,6 +439,14 @@ def send_message(
     actor: AuthenticatedActor = Depends(get_current_actor),
 ):
     consultation = _require_participant(consultation_id, actor, db)
+    if consultation.status in {
+        models.ConsultationStatus.COMPLETED,
+        models.ConsultationStatus.CANCELLED,
+    }:
+        raise HTTPException(
+            status_code=409,
+            detail="Messages cannot be sent to a closed consultation",
+        )
     if not payload.content and not payload.attachment_uri:
         raise HTTPException(status_code=400, detail="Message must have content or an attachment")
     actual_sender = "user" if actor.role == "owner" else "vet"
@@ -494,6 +545,47 @@ def share_assessment(
     return shared
 
 
+@router.get(
+    "/consultations/{consultation_id}/shared-assessments",
+    response_model=list[SharedAssessmentDetailResponse],
+)
+def list_shared_assessments(
+    consultation_id: int,
+    db: Session = Depends(get_db),
+    actor: AuthenticatedActor = Depends(get_current_actor),
+    auth_context: SupabaseAuthContext = Depends(get_supabase_auth_context),
+):
+    _require_participant(consultation_id, actor, db)
+    shared_rows = (
+        db.query(models.ConsultationSharedAssessment)
+        .options(joinedload(models.ConsultationSharedAssessment.assessment))
+        .filter_by(consultation_id=consultation_id, revoked_at=None)
+        .order_by(models.ConsultationSharedAssessment.shared_at.desc())
+        .all()
+    )
+    results = []
+    for shared in shared_rows:
+        assessment = schemas.AssessmentResponse.model_validate(shared.assessment)
+        if assessment.image_uri:
+            try:
+                assessment.image_uri = create_assessment_signed_url(
+                    auth_context.access_token, assessment.image_uri
+                )
+            except Exception:
+                assessment.image_uri = None
+        results.append(
+            SharedAssessmentDetailResponse(
+                id=shared.id,
+                consultation_id=shared.consultation_id,
+                assessment_id=shared.assessment_id,
+                shared_at=shared.shared_at,
+                revoked_at=shared.revoked_at,
+                assessment=assessment,
+            )
+        )
+    return results
+
+
 @router.delete("/consultations/{consultation_id}/shared-assessments/{assessment_id}", status_code=204)
 def revoke_assessment_share(
     consultation_id: int,
@@ -579,16 +671,76 @@ def decide_appointment(
     appointment.status = payload.decision
     appointment.responded_at = now_bkk()
     appointment.updated_at = now_bkk()
-    if payload.decision == "accepted":
-        db.add(models.CalendarEvent(
-            pet_id=appointment.pet_id,
-            appointment_id=appointment.id,
-            title="Veterinary appointment",
-            event_type="vet",
-            event_date=appointment.starts_at.date(),
-            starts_at=appointment.starts_at,
-            reminder_minutes=30,
-        ))
+    _sync_appointment_calendar(appointment, db)
+    db.commit()
+    db.refresh(appointment)
+    return appointment
+
+
+@router.put("/appointments/{appointment_id}", response_model=AppointmentResponse)
+def update_appointment(
+    appointment_id: int,
+    payload: AppointmentUpdate,
+    db: Session = Depends(get_db),
+    actor: AuthenticatedActor = Depends(get_current_actor),
+):
+    appointment = db.query(models.Appointment).filter_by(id=appointment_id).first()
+    if not appointment:
+        raise HTTPException(status_code=404, detail="Appointment not found")
+    _require_participant(appointment.consultation_id, actor, db)
+    if actor.role != "vet":
+        raise HTTPException(
+            status_code=403,
+            detail="Only the assigned veterinarian can reschedule appointments",
+        )
+    if appointment.status not in {"proposed", "accepted"}:
+        raise HTTPException(status_code=409, detail="Appointment can no longer be changed")
+    if not payload.model_fields_set:
+        raise HTTPException(status_code=422, detail="No appointment changes supplied")
+
+    starts_at = payload.starts_at or appointment.starts_at
+    ends_at = payload.ends_at if "ends_at" in payload.model_fields_set else appointment.ends_at
+    if starts_at.tzinfo is None:
+        raise HTTPException(status_code=422, detail="starts_at must include a timezone")
+    if starts_at <= now_bkk():
+        raise HTTPException(status_code=422, detail="starts_at must be in the future")
+    if ends_at is not None:
+        if ends_at.tzinfo is None:
+            raise HTTPException(status_code=422, detail="ends_at must include a timezone")
+        if ends_at <= starts_at:
+            raise HTTPException(status_code=422, detail="ends_at must be after starts_at")
+
+    appointment.starts_at = starts_at
+    appointment.ends_at = ends_at
+    if "reason" in payload.model_fields_set:
+        appointment.reason = payload.reason
+    appointment.updated_at = now_bkk()
+    _sync_appointment_calendar(appointment, db)
+    db.commit()
+    db.refresh(appointment)
+    return appointment
+
+
+@router.put(
+    "/appointments/{appointment_id}/cancel",
+    response_model=AppointmentResponse,
+)
+def cancel_appointment(
+    appointment_id: int,
+    db: Session = Depends(get_db),
+    actor: AuthenticatedActor = Depends(get_current_actor),
+):
+    appointment = db.query(models.Appointment).filter_by(id=appointment_id).first()
+    if not appointment:
+        raise HTTPException(status_code=404, detail="Appointment not found")
+    _require_participant(appointment.consultation_id, actor, db)
+    if appointment.status == "cancelled":
+        return appointment
+    if appointment.status not in {"proposed", "accepted"}:
+        raise HTTPException(status_code=409, detail="Appointment can no longer be cancelled")
+    appointment.status = "cancelled"
+    appointment.updated_at = now_bkk()
+    _sync_appointment_calendar(appointment, db)
     db.commit()
     db.refresh(appointment)
     return appointment
