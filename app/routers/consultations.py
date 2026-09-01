@@ -74,6 +74,8 @@ class ConsultationCreate(BaseModel):
     assessment_id: int | None = None
     subject: str | None = Field(default=None, max_length=200)
     notes: str | None = None
+    priority: Literal["normal", "urgent"] = "normal"
+    urgent_help_acknowledged: bool = False
 
 
 class ConsultationResponse(BaseModel):
@@ -83,6 +85,7 @@ class ConsultationResponse(BaseModel):
     vet_id: int
     provider_id: int | None
     status: models.ConsultationStatus
+    priority: str
     assessment_id: int | None
     subject: str | None
     notes: str | None
@@ -340,6 +343,17 @@ def create_consultation(
     owner: models.User = Depends(get_current_user),
 ):
     require_owned_pet(payload.pet_id, owner, db)
+    if payload.priority == "urgent":
+        if not payload.urgent_help_acknowledged:
+            raise HTTPException(
+                status_code=422,
+                detail="Urgent Help disclaimer must be acknowledged",
+            )
+        if payload.provider_id is None:
+            raise HTTPException(
+                status_code=422,
+                detail="Urgent Help requires a Petto-enabled provider",
+            )
     vet = db.query(models.Veterinarian).filter_by(id=payload.vet_id).first()
     if not vet or vet.verification_status != "approved":
         raise HTTPException(status_code=404, detail="Verified veterinarian not found")
@@ -362,7 +376,10 @@ def create_consultation(
         ).first()
         if not assessment:
             raise HTTPException(status_code=404, detail="Assessment not found for this pet")
-    consultation = models.Consultation(**payload.model_dump())
+    consultation_data = payload.model_dump(exclude={"urgent_help_acknowledged"})
+    if payload.priority == "urgent" and not payload.subject:
+        consultation_data["subject"] = "Urgent Help"
+    consultation = models.Consultation(**consultation_data)
     db.add(consultation)
     db.flush()
     if assessment:

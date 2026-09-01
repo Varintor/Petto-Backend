@@ -237,6 +237,7 @@ class Consultation(Base):
         BigInteger, ForeignKey("veterinary_providers.id", ondelete="SET NULL"), nullable=True, index=True
     )
     status = Column(ConsultationStatusType, nullable=False, server_default=text("'PENDING'"))
+    priority = Column(String(20), nullable=False, server_default=text("'normal'"))
     # Optional link to the AI assessment being forwarded to the vet (UD-06).
     assessment_id = Column(
         BigInteger, ForeignKey("health_assessments.id", ondelete="SET NULL"),
@@ -258,6 +259,13 @@ class Consultation(Base):
     appointments = relationship("Appointment", back_populates="consultation", cascade="all, delete-orphan")
     shared_health_cards = relationship(
         "ConsultationSharedHealthCard", back_populates="consultation", cascade="all, delete-orphan"
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "priority IN ('normal', 'urgent')",
+            name="consultations_valid_priority",
+        ),
     )
 
 

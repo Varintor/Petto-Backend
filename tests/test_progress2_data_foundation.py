@@ -214,6 +214,72 @@ def test_provider_directory_exposes_only_available_verified_vets(
     assert [item["id"] for item in vets.json()] == [approved_vet.id]
 
 
+def test_urgent_help_requires_acknowledged_petto_provider(
+    auth_client, pet, approved_vet, db
+):
+    provider = models.VeterinaryProvider(
+        name="Petto Partner Hospital",
+        provider_type="hospital",
+        provider_status="partner",
+        consultation_enabled=True,
+    )
+    db.add(provider)
+    db.flush()
+    db.add(
+        models.ProviderVeterinarian(
+            provider_id=provider.id,
+            veterinarian_id=approved_vet.id,
+            is_active=True,
+            accepting_consultations=True,
+        )
+    )
+    db.commit()
+
+    payload = {
+        "pet_id": pet.id,
+        "vet_id": approved_vet.id,
+        "provider_id": provider.id,
+        "priority": "urgent",
+    }
+    missing_ack = auth_client.post("/api/v1/consultations", json=payload)
+    assert missing_ack.status_code == 422
+    assert missing_ack.json()["detail"] == "Urgent Help disclaimer must be acknowledged"
+
+    urgent = auth_client.post(
+        "/api/v1/consultations",
+        json={**payload, "urgent_help_acknowledged": True},
+    )
+    assert urgent.status_code == 200, urgent.text
+    assert urgent.json()["priority"] == "urgent"
+    assert urgent.json()["subject"] == "Urgent Help"
+
+
+def test_urgent_help_cannot_target_information_only_provider(
+    auth_client, pet, approved_vet, db
+):
+    provider = models.VeterinaryProvider(
+        name="Information Only Hospital",
+        provider_type="hospital",
+        provider_status="listed",
+        consultation_enabled=False,
+    )
+    db.add(provider)
+    db.commit()
+
+    response = auth_client.post(
+        "/api/v1/consultations",
+        json={
+            "pet_id": pet.id,
+            "vet_id": approved_vet.id,
+            "provider_id": provider.id,
+            "priority": "urgent",
+            "urgent_help_acknowledged": True,
+        },
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Consultation is not available for this provider"
+
+
 def test_vet_proposes_and_owner_accepts_appointment_into_calendar(
     auth_client, pet, approved_vet, db
 ):
