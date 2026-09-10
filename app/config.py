@@ -126,6 +126,30 @@ def validate_environment(
         if _is_enabled(source.get("ENABLE_MOCK_DATA")):
             errors.append(f"ENABLE_MOCK_DATA must be disabled in {app_env}")
 
+        admin_key = source.get("ADMIN_API_KEY", "").strip()
+        if admin_key:
+            if len(admin_key) < 24:
+                errors.append("ADMIN_API_KEY must contain at least 24 characters")
+            if not (
+                source.get("SUPABASE_SECRET_KEY", "").strip()
+                or source.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+            ):
+                errors.append(
+                    "SUPABASE_SECRET_KEY is required when veterinarian administration is enabled"
+                )
+            invite_redirect = source.get("VET_INVITE_REDIRECT_URL", "").strip()
+            if not invite_redirect:
+                errors.append(
+                    "VET_INVITE_REDIRECT_URL is required when veterinarian administration is enabled"
+                )
+            elif not _has_valid_url(
+                invite_redirect,
+                schemes={"https", "petto"},
+            ):
+                errors.append(
+                    "VET_INVITE_REDIRECT_URL must be a valid HTTPS or petto URL"
+                )
+
     if app_env == "production":
         origins = [
             origin.strip()
