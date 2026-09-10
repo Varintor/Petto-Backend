@@ -1,186 +1,150 @@
-# -*- coding: utf-8 -*-
-"""Feature 4 - Mode B: paired tracking devices (BLE/GPS collar).
-
-Pairing + telemetry ingest. Telemetry is aggregated on arrival: only the
-LATEST position is kept on the device row (live-map pin, SRS-F4-037/038);
-the raw sample list is never persisted (proposal privacy rule). A finished
-collar session may be flushed into activity_logs with source='device'.
-"""
-from datetime import datetime
+"""Owner-scoped device pairing, telemetry, persistent alerts and sessions."""
+from datetime import datetime, timedelta
 from typing import List, Optional
+from uuid import UUID
+import hashlib
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
 from app import models
 from app.auth import get_current_user, require_owned_pet
 from app.database import get_db
-from app.services.anomaly import detect_anomalies
+from app.routers.activities import _complete_walk_mission
+from app.services.anomaly import apply_sample, low_battery_detection, offline_detection
 from app.utils.time import now_bkk
 
 router = APIRouter(prefix="/api/v1", tags=["Tracking Devices"])
 
 
-# ==========================================
-# Schemas
-# ==========================================
 class DevicePair(BaseModel):
     name: str = Field(min_length=1, max_length=120)
-    identifier: str = Field(min_length=3, max_length=120)  # MAC address / serial
+    identifier: str = Field(min_length=3, max_length=120)
     device_type: str = "ble_collar"
 
 
 class DeviceResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
-
-    id: int
-    pet_id: int
-    name: str
-    device_type: str
-    identifier: str
-    is_active: bool
+    id: int; pet_id: int; name: str; device_type: str; identifier: str; is_active: bool
     battery_percent: Optional[int] = None
-    last_lat: Optional[float] = None
-    last_lng: Optional[float] = None
-    last_seen_at: Optional[datetime] = None
-    paired_at: Optional[datetime] = None
+    last_lat: Optional[float] = None; last_lng: Optional[float] = None
+    last_seen_at: Optional[datetime] = None; paired_at: Optional[datetime] = None
+    last_speed_kmh: Optional[float] = None; last_accuracy_m: Optional[float] = None
+    last_moved_at: Optional[datetime] = None; motion_state: str = "unknown"
 
+
+class AlertResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int; device_id: int; alert_type: str; severity: str; message: str
+    detected_at: datetime; acknowledged_at: Optional[datetime] = None; resolved_at: Optional[datetime] = None
+    alert_metadata: dict = Field(validation_alias="alert_metadata", serialization_alias="metadata")
 
 
 class TelemetrySample(BaseModel):
-    lat: float = Field(ge=-90, le=90)
-    lng: float = Field(ge=-180, le=180)
-    speed_kmh: Optional[float] = Field(default=None, ge=0, le=500)
+    lat: float = Field(ge=-90, le=90); lng: float = Field(ge=-180, le=180)
+    speed_kmh: Optional[float] = Field(default=None, ge=0, le=200)
+    accuracy_m: Optional[float] = Field(default=None, ge=0, le=10000)
     recorded_at: Optional[datetime] = None
 
 
 class TelemetryBatch(BaseModel):
-    samples: List[TelemetrySample]
+    samples: List[TelemetrySample] = Field(min_length=1, max_length=500)
     battery_percent: Optional[int] = Field(default=None, ge=0, le=100)
-    # When the collar reports a finished movement session, the aggregates are
-    # written to activity_logs (source='device') so stats/missions see them.
-    session_duration_minutes: Optional[float] = Field(default=None, ge=0)
-    session_distance_meters: Optional[float] = Field(default=None, ge=0)
+    session_id: Optional[UUID] = None
+    session_duration_minutes: Optional[float] = Field(default=None, ge=0, le=1440)
+    session_distance_meters: Optional[float] = Field(default=None, ge=0, le=1000000)
 
 
 class TelemetryResult(BaseModel):
-    device: DeviceResponse
-    anomalies: List[dict]
-    activity_logged: bool
+    device: DeviceResponse; anomalies: List[dict]; activity_logged: bool
 
 
-def _require_owned_device(device_id: int, current_user: models.User, db: Session) -> models.Device:
-    device = db.query(models.Device).filter(models.Device.id == device_id).first()
-    if not device:
-        raise HTTPException(status_code=404, detail="Device not found")
-    require_owned_pet(device.pet_id, current_user, db)
+def _owned_device(device_id: int, user: models.User, db: Session) -> models.Device:
+    device = db.query(models.Device).filter_by(id=device_id).first()
+    if not device: raise HTTPException(404, "Device not found")
+    require_owned_pet(device.pet_id, user, db)
     return device
 
 
-# ==========================================
-# Pairing
-# ==========================================
+def _persist(db: Session, device: models.Device, detection):
+    active = db.query(models.DeviceAlert).filter_by(device_id=device.id, alert_type=detection.kind, resolved_at=None).first()
+    if active: return active
+    alert = models.DeviceAlert(device_id=device.id, alert_type=detection.kind, severity=detection.severity, message=detection.message, alert_metadata=detection.metadata)
+    db.add(alert); return alert
+
+
 @router.post("/pets/{pet_id}/devices", response_model=DeviceResponse)
-def pair_device(
-    pet_id: int,
-    payload: DevicePair,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
-):
-    """Pair a collar with a pet (SRS-F4-035)."""
-    require_owned_pet(pet_id, current_user, db)
-
-    existing = db.query(models.Device).filter(
-        models.Device.identifier == payload.identifier
-    ).first()
-    if existing:
-        raise HTTPException(status_code=409, detail="Device is already paired")
-
-    device = models.Device(pet_id=pet_id, **payload.model_dump())
-    db.add(device)
-    db.commit()
-    db.refresh(device)
-    return device
+def pair_device(pet_id: int, payload: DevicePair, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)):
+    require_owned_pet(pet_id, user, db)
+    if db.query(models.Device).filter_by(identifier=payload.identifier).first(): raise HTTPException(409, "Device is already paired")
+    row = models.Device(pet_id=pet_id, **payload.model_dump()); db.add(row); db.commit(); db.refresh(row); return row
 
 
 @router.get("/pets/{pet_id}/devices", response_model=List[DeviceResponse])
-def list_devices(
-    pet_id: int,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
-):
-    require_owned_pet(pet_id, current_user, db)
-    return db.query(models.Device).filter(models.Device.pet_id == pet_id).all()
+def list_devices(pet_id: int, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)):
+    require_owned_pet(pet_id, user, db); return db.query(models.Device).filter_by(pet_id=pet_id).all()
 
 
 @router.delete("/devices/{device_id}")
-def unpair_device(
-    device_id: int,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
-):
-    device = _require_owned_device(device_id, current_user, db)
-    db.delete(device)
-    db.commit()
-    return {"message": "Device unpaired"}
+def unpair_device(device_id: int, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)):
+    row = _owned_device(device_id, user, db); db.delete(row); db.commit(); return {"message": "Device unpaired"}
 
 
-# ==========================================
-# Telemetry ingest
-# ==========================================
 @router.post("/devices/{device_id}/telemetry", response_model=TelemetryResult)
-def ingest_telemetry(
-    device_id: int,
-    batch: TelemetryBatch,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
-):
-    """Ingest a collar telemetry batch (SRS-F4-037..042).
-
-    Aggregates in-memory: keeps only the latest position on the device row and
-    optionally flushes a finished session into activity_logs. Raw samples are
-    discarded after this request.
-    """
-    device = _require_owned_device(device_id, current_user, db)
-    if not batch.samples:
-        raise HTTPException(status_code=400, detail="Telemetry batch is empty")
-
-    now = now_bkk()
-    speeds = [s.speed_kmh for s in batch.samples if s.speed_kmh is not None]
-    max_speed = max(speeds) if speeds else None
-
-    # Anomaly rules run BEFORE last_seen_at is refreshed, so a long gap since
-    # the previous batch is visible to the inactivity rule (SRS-F4-040).
-    previous_seen = device.last_seen_at
-    anomalies = detect_anomalies(
-        last_seen_at=previous_seen, now=now, max_speed_kmh=max_speed,
-    )
-
-    latest = batch.samples[-1]
-    device.last_lat = latest.lat
-    device.last_lng = latest.lng
-    device.last_seen_at = now
-    if batch.battery_percent is not None:
-        device.battery_percent = batch.battery_percent
-
+def ingest_telemetry(device_id: int, batch: TelemetryBatch, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)):
+    device = _owned_device(device_id, user, db); now = now_bkk(); found = []
+    for sample in sorted(batch.samples, key=lambda x: x.recorded_at or now):
+        stamp = sample.recorded_at or now
+        if stamp > now + timedelta(minutes=5) or stamp < now - timedelta(days=7): raise HTTPException(422, "Telemetry timestamp is outside the accepted window")
+        found += apply_sample(device=device, lat=sample.lat, lng=sample.lng, speed_kmh=sample.speed_kmh, accuracy_m=sample.accuracy_m, recorded_at=stamp)
+    if batch.battery_percent is not None: device.battery_percent = batch.battery_percent
+    battery = low_battery_detection(batch.battery_percent)
+    if battery: found.append(battery)
+    for detection in found: _persist(db, device, detection)
     activity_logged = False
     if batch.session_duration_minutes and batch.session_duration_minutes > 0:
-        db.add(models.ActivityLog(
-            pet_id=device.pet_id,
-            source=models.ActivitySource.DEVICE,
-            activity_type="walking",
-            duration_minutes=batch.session_duration_minutes,
-            distance_meters=batch.session_distance_meters or 0.0,
-            max_speed_kmh=max_speed,
-        ))
-        activity_logged = True
+        if batch.session_id:
+            key = f"tracking:{batch.session_id}"
+        else:
+            fingerprint = f"{device.id}:{batch.session_duration_minutes}:{batch.session_distance_meters}:{[(s.lat, s.lng, s.recorded_at) for s in batch.samples]}"
+            key = "tracking:auto:" + hashlib.sha256(fingerprint.encode()).hexdigest()
+        existing = db.query(models.ActivityLog).filter_by(pet_id=device.pet_id, session_key=key).first()
+        if not existing:
+            qualifies = batch.session_duration_minutes >= 15
+            db.add(models.ActivityLog(pet_id=device.pet_id, source=models.ActivitySource.DEVICE, activity_type="walking", duration_minutes=batch.session_duration_minutes, distance_meters=batch.session_distance_meters or 0, max_speed_kmh=max((s.speed_kmh or 0 for s in batch.samples), default=0), session_key=key, is_mission_completed=qualifies))
+            if qualifies: _complete_walk_mission(device.pet_id, db)
+            activity_logged = True
+    db.commit(); db.refresh(device)
+    return TelemetryResult(device=DeviceResponse.model_validate(device), anomalies=[{"kind": d.kind, "message": d.message} for d in found], activity_logged=activity_logged)
 
-    db.commit()
-    db.refresh(device)
 
-    return TelemetryResult(
-        device=DeviceResponse.model_validate(device),
-        anomalies=[{"kind": a.kind, "message": a.message} for a in anomalies],
-        activity_logged=activity_logged,
-    )
+@router.get("/pets/{pet_id}/device-alerts", response_model=List[AlertResponse])
+def list_alerts(pet_id: int, active_only: bool = Query(False), db: Session = Depends(get_db), user: models.User = Depends(get_current_user)):
+    require_owned_pet(pet_id, user, db)
+    query = db.query(models.DeviceAlert).join(models.Device).filter(models.Device.pet_id == pet_id)
+    if active_only: query = query.filter(models.DeviceAlert.resolved_at.is_(None))
+    return query.order_by(models.DeviceAlert.detected_at.desc()).limit(100).all()
+
+
+def _owned_alert(alert_id: int, user, db):
+    alert = db.query(models.DeviceAlert).filter_by(id=alert_id).first()
+    if not alert: raise HTTPException(404, "Alert not found")
+    _owned_device(alert.device_id, user, db); return alert
+
+
+@router.post("/device-alerts/{alert_id}/acknowledge", response_model=AlertResponse)
+def acknowledge(alert_id: int, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)):
+    alert = _owned_alert(alert_id, user, db); alert.acknowledged_at = alert.acknowledged_at or now_bkk(); db.commit(); db.refresh(alert); return alert
+
+
+@router.post("/device-alerts/{alert_id}/resolve", response_model=AlertResponse)
+def resolve(alert_id: int, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)):
+    alert = _owned_alert(alert_id, user, db); alert.resolved_at = alert.resolved_at or now_bkk(); db.commit(); db.refresh(alert); return alert
+
+
+@router.post("/devices/{device_id}/check-offline", response_model=List[AlertResponse])
+def check_offline(device_id: int, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)):
+    device = _owned_device(device_id, user, db); detection = offline_detection(device.last_seen_at, now_bkk())
+    if detection: device.motion_state = "offline"; _persist(db, device, detection)
+    db.commit(); return db.query(models.DeviceAlert).filter_by(device_id=device.id, resolved_at=None).all()

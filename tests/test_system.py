@@ -98,7 +98,7 @@ def test_production_rejects_wildcard_cors():
 
 
 def test_repository_expected_revision_is_current_head():
-    assert expected_database_revisions() == ("0017_urgent_consultations",)
+    assert expected_database_revisions() == ("0019_public_pet_cards",)
 
 
 def test_database_pool_timeout_returns_retryable_503():

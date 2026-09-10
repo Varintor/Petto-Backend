@@ -93,6 +93,7 @@ class Pet(Base):
     vaccinations = relationship("Vaccination", back_populates="pet", cascade="all, delete-orphan")
     missions = relationship("DailyMission", back_populates="pet", cascade="all, delete-orphan")
     devices = relationship("Device", back_populates="pet", cascade="all, delete-orphan")
+    public_card = relationship("PublicPetCard", back_populates="pet", cascade="all, delete-orphan", uselist=False)
     calendar_events = relationship("CalendarEvent", back_populates="pet", cascade="all, delete-orphan")
     wardrobe_items = relationship("PetWardrobeItem", back_populates="pet", cascade="all, delete-orphan")
     health_profile = relationship(
@@ -412,6 +413,7 @@ class ActivityLog(Base):
     started_at = Column(DateTime(timezone=True), nullable=True)
     ended_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+    session_key = Column(String(120), nullable=True)
 
     pet = relationship("Pet", back_populates="activities")
     mission = relationship("DailyMission", back_populates="activities")
@@ -547,6 +549,46 @@ class Device(Base):
     last_lat = Column(Float, nullable=True)
     last_lng = Column(Float, nullable=True)
     last_seen_at = Column(DateTime(timezone=True), nullable=True)
+    last_speed_kmh = Column(Float, nullable=True)
+    last_accuracy_m = Column(Float, nullable=True)
+    last_moved_at = Column(DateTime(timezone=True), nullable=True)
+    motion_state = Column(String(20), nullable=False, server_default=text("'unknown'"))
+    high_speed_started_at = Column(DateTime(timezone=True), nullable=True)
+    high_speed_sample_count = Column(Integer, nullable=False, server_default=text("0"))
     paired_at = Column(DateTime(timezone=True), server_default=func.now())
 
     pet = relationship("Pet", back_populates="devices")
+    alerts = relationship("DeviceAlert", back_populates="device", cascade="all, delete-orphan")
+
+
+class DeviceAlert(Base):
+    __tablename__ = "device_alerts"
+
+    id = Column(BigInteger, primary_key=True)
+    device_id = Column(BigInteger, ForeignKey("devices.id", ondelete="CASCADE"), nullable=False, index=True)
+    alert_type = Column(String(40), nullable=False)
+    severity = Column(String(20), nullable=False)
+    message = Column(Text, nullable=False)
+    detected_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    acknowledged_at = Column(DateTime(timezone=True), nullable=True)
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
+    alert_metadata = Column("metadata", JSON, nullable=False, default=dict)
+
+    device = relationship("Device", back_populates="alerts")
+
+
+class PublicPetCard(Base):
+    __tablename__ = "public_pet_cards"
+
+    id = Column(BigInteger, primary_key=True)
+    pet_id = Column(BigInteger, ForeignKey("pet_profiles.id", ondelete="CASCADE"), nullable=False, unique=True, index=True)
+    token_hash = Column(String(64), nullable=False, unique=True, index=True)
+    is_active = Column(Boolean, nullable=False, server_default=text("true"))
+    visible_fields = Column(JSON, nullable=False, default=list)
+    contact_method = Column(String(255), nullable=True)
+    emergency_notes = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+
+    pet = relationship("Pet", back_populates="public_card")
