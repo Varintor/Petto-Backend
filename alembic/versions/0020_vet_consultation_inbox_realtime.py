@@ -1,13 +1,13 @@
 """publish veterinarian consultation inbox changes to realtime
 
-Revision ID: 0020_vet_consultation_inbox_realtime
+Revision ID: 0020_vet_inbox_realtime
 Revises: 0019_public_pet_cards
 """
 
 from alembic import op
 
 
-revision = "0020_vet_consultation_inbox_realtime"
+revision = "0020_vet_inbox_realtime"
 down_revision = "0019_public_pet_cards"
 branch_labels = depends_on = None
 
