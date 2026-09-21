@@ -559,6 +559,11 @@ class Device(Base):
 
     pet = relationship("Pet", back_populates="devices")
     alerts = relationship("DeviceAlert", back_populates="device", cascade="all, delete-orphan")
+    telemetry_points = relationship(
+        "DeviceTelemetryPoint",
+        back_populates="device",
+        cascade="all, delete-orphan",
+    )
 
 
 class DeviceAlert(Base):
@@ -575,6 +580,32 @@ class DeviceAlert(Base):
     alert_metadata = Column("metadata", JSON, nullable=False, default=dict)
 
     device = relationship("Device", back_populates="alerts")
+
+
+class DeviceTelemetryPoint(Base):
+    """Bounded GPS history used for the live route and movement summary.
+
+    The ingest route removes points older than seven days. This keeps enough
+    data for a useful owner-facing trend without turning Petto into an
+    indefinite precise-location archive.
+    """
+
+    __tablename__ = "device_telemetry_points"
+
+    id = Column(BigInteger, primary_key=True)
+    device_id = Column(
+        BigInteger,
+        ForeignKey("devices.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    lat = Column(Float, nullable=False)
+    lng = Column(Float, nullable=False)
+    speed_kmh = Column(Float, nullable=True)
+    accuracy_m = Column(Float, nullable=True)
+    motion_state = Column(String(20), nullable=False)
+    recorded_at = Column(DateTime(timezone=True), nullable=False)
+
+    device = relationship("Device", back_populates="telemetry_points")
 
 
 class PublicPetCard(Base):

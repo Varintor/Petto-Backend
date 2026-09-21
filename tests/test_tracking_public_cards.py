@@ -1,3 +1,4 @@
+from datetime import timedelta
 from uuid import uuid4
 from app import models
 from app.utils.time import now_bkk
@@ -27,6 +28,44 @@ def test_device_session_is_idempotent_and_completes_walk(auth_client, pet, db):
     assert first["activity_logged"] is True and second["activity_logged"] is False
     assert db.query(models.ActivityLog).count() == 1
     assert db.query(models.DailyMission).first().is_completed is True
+
+
+def test_telemetry_history_and_motion_summary_are_owner_scoped(auth_client, pet, db):
+    device = _device(auth_client, pet, "history")
+    started = now_bkk() - timedelta(minutes=3)
+    payload = {
+        "samples": [
+            {"lat": 18.7960, "lng": 98.9610, "speed_kmh": 0.0, "recorded_at": started.isoformat()},
+            {"lat": 18.7960, "lng": 98.9610, "speed_kmh": 0.0, "recorded_at": (started + timedelta(minutes=1)).isoformat()},
+            {"lat": 18.7970, "lng": 98.9620, "speed_kmh": 5.0, "recorded_at": (started + timedelta(minutes=2)).isoformat()},
+        ]
+    }
+    response = auth_client.post(
+        f"/api/v1/devices/{device['id']}/telemetry",
+        json=payload,
+    )
+    assert response.status_code == 200
+
+    history = auth_client.get(
+        f"/api/v1/devices/{device['id']}/telemetry-history?minutes=60"
+    )
+    assert history.status_code == 200
+    assert [point["motion_state"] for point in history.json()] == [
+        "moving",
+        "stationary",
+        "moving",
+    ]
+
+    summary = auth_client.get(
+        f"/api/v1/devices/{device['id']}/motion-summary?hours=1"
+    )
+    assert summary.status_code == 200
+    data = summary.json()
+    assert data["sample_count"] == 3
+    assert data["moving_minutes"] == 1.0
+    assert data["stationary_minutes"] == 1.0
+    assert data["trend"] == "mixed"
+    assert data["distance_meters"] > 100
 
 
 def test_public_card_allowlist_rotate_revoke(auth_client, pet, db):
