@@ -79,3 +79,36 @@ def test_public_card_allowlist_rotate_revoke(auth_client, pet, db):
     assert auth_client.get(f"/api/v1/public/pets/{rotated}").status_code == 200
     auth_client.post(f"/api/v1/pets/{pet.id}/public-card/revoke")
     assert auth_client.get(f"/api/v1/public/pets/{rotated}").status_code == 404
+
+
+def test_public_card_html_is_human_readable_allowlisted_and_not_cached(
+    auth_client, pet, db
+):
+    db.add(
+        models.PetHealthProfile(
+            pet_id=pet.id,
+            allergies=["pollen"],
+            chronic_conditions=["private condition"],
+            current_medications=[],
+        )
+    )
+    db.commit()
+    created = auth_client.put(
+        f"/api/v1/pets/{pet.id}/public-card",
+        json={
+            "visible_fields": ["name", "species", "allergies"],
+            "emergency_notes": "Private unless explicitly selected",
+        },
+    ).json()
+
+    response = auth_client.get(
+        f"/api/v1/public/pets/{created['token']}/card"
+    )
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store, max-age=0"
+    assert response.headers["referrer-policy"] == "no-referrer"
+    assert pet.name in response.text
+    assert "pollen" in response.text
+    assert "private condition" not in response.text
+    assert "Private unless explicitly selected" not in response.text
