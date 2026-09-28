@@ -270,7 +270,7 @@ def create_vet(vet: VetCreate, db: Session = Depends(get_db)):
 def list_vets(
     online_only: bool = False,
     db: Session = Depends(get_db),
-    _: models.User = Depends(get_current_user),
+    _: AuthenticatedActor = Depends(get_current_actor),
 ):
     query = db.query(models.Veterinarian).filter(
         models.Veterinarian.verification_status == "approved"
