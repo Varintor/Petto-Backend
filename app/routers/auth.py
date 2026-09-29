@@ -8,10 +8,11 @@ from pydantic import BaseModel
 from app import models, schemas
 from app.database import get_db
 from app.auth import (
+    SupabaseAuthContext,
     register_user,
     login_user,
     request_password_reset,
-    get_supabase_uid,
+    get_supabase_auth_context,
 )
 
 router = APIRouter(
@@ -253,9 +254,10 @@ def login(req: schemas.LoginRequest, db: Session = Depends(get_db)):
 
 @router.get("/me", response_model=schemas.UserResponse)
 def get_me(
-    supabase_uid: str = Depends(get_supabase_uid),
+    auth_context: SupabaseAuthContext = Depends(get_supabase_auth_context),
     db: Session = Depends(get_db),
 ):
+    supabase_uid = auth_context.supabase_uid
     user = db.query(models.User).filter(models.User.supabase_uid == supabase_uid).first()
     if user:
         return _actor_response(user)
@@ -263,7 +265,34 @@ def get_me(
         models.Veterinarian.supabase_uid == supabase_uid
     ).first()
     if not veterinarian:
-        raise HTTPException(status_code=401, detail="Account not found")
+        email = (auth_context.email or "").strip().lower()
+        if not email:
+            raise HTTPException(status_code=401, detail="Account email is unavailable")
+
+        existing = db.query(models.User).filter(models.User.email == email).first()
+        if existing:
+            if existing.supabase_uid not in {None, supabase_uid}:
+                raise HTTPException(status_code=409, detail="Email is linked to another account")
+            existing.supabase_uid = supabase_uid
+            user = existing
+        else:
+            metadata = auth_context.user_metadata or {}
+            display_name = (
+                metadata.get("name")
+                or metadata.get("full_name")
+                or email.split("@", 1)[0]
+            )
+            avatar_uri = metadata.get("avatar_url") or metadata.get("picture")
+            user = models.User(
+                supabase_uid=supabase_uid,
+                email=email,
+                name=str(display_name),
+                avatar_uri=str(avatar_uri) if avatar_uri else None,
+            )
+            db.add(user)
+        db.commit()
+        db.refresh(user)
+        return _actor_response(user)
     if veterinarian.verification_status != "approved":
         raise HTTPException(status_code=403, detail="Veterinarian account is not approved")
     return _actor_response(veterinarian)

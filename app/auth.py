@@ -1,6 +1,6 @@
 import os
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import Depends, HTTPException
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -24,6 +24,8 @@ class SupabaseAuthContext:
 
     supabase_uid: str
     access_token: str
+    email: str | None = None
+    user_metadata: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -92,6 +94,8 @@ def get_supabase_auth_context(
     return SupabaseAuthContext(
         supabase_uid=response.user.id,
         access_token=token,
+        email=getattr(response.user, "email", None),
+        user_metadata=getattr(response.user, "user_metadata", None) or {},
     )
 
 
