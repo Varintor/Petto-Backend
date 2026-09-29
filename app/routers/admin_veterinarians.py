@@ -91,6 +91,7 @@ class VeterinarianUpdate(BaseModel):
     license_number: str | None = Field(default=None, max_length=100)
     specialty: str | None = Field(default=None, max_length=200)
     avatar_uri: str | None = Field(default=None, max_length=2048)
+    is_online: bool | None = None
     is_accepting_consultations: bool | None = None
 
     @field_validator("name")
@@ -113,6 +114,50 @@ class ProviderAssignment(BaseModel):
     accepting_consultations: bool = True
 
 
+class ProviderCreate(BaseModel):
+    external_place_id: str | None = Field(default=None, max_length=255)
+    name: str = Field(min_length=1, max_length=200)
+    provider_type: Literal["hospital", "clinic", "independent"] = "hospital"
+    address: str | None = None
+    phone: str | None = Field(default=None, max_length=50)
+    latitude: float | None = Field(default=None, ge=-90, le=90)
+    longitude: float | None = Field(default=None, ge=-180, le=180)
+    operating_hours: dict | None = None
+    provider_status: Literal["listed", "partner", "disabled"] = "listed"
+    consultation_enabled: bool = False
+
+    @field_validator("name")
+    @classmethod
+    def normalize_provider_name(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("Provider name is required")
+        return normalized
+
+
+class ProviderUpdate(BaseModel):
+    external_place_id: str | None = Field(default=None, max_length=255)
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    provider_type: Literal["hospital", "clinic", "independent"] | None = None
+    address: str | None = None
+    phone: str | None = Field(default=None, max_length=50)
+    latitude: float | None = Field(default=None, ge=-90, le=90)
+    longitude: float | None = Field(default=None, ge=-180, le=180)
+    operating_hours: dict | None = None
+    provider_status: Literal["listed", "partner", "disabled"] | None = None
+    consultation_enabled: bool | None = None
+
+    @field_validator("name")
+    @classmethod
+    def normalize_provider_update_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("Provider name is required")
+        return normalized
+
+
 class VeterinarianAdminResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -128,6 +173,25 @@ class VeterinarianAdminResponse(BaseModel):
     is_online: bool
     is_accepting_consultations: bool
     provider_ids: list[int]
+    created_at: datetime
+    updated_at: datetime | None
+
+
+class ProviderAdminResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    external_place_id: str | None
+    name: str
+    provider_type: str
+    address: str | None
+    phone: str | None
+    latitude: float | None
+    longitude: float | None
+    operating_hours: dict | None
+    provider_status: str
+    consultation_enabled: bool
+    veterinarian_ids: list[int]
     created_at: datetime
     updated_at: datetime | None
 
@@ -164,6 +228,71 @@ def _get_vet_or_404(veterinarian_id: int, db: Session) -> models.Veterinarian:
     if vet is None:
         raise HTTPException(status_code=404, detail="Veterinarian not found")
     return vet
+
+
+def _provider_query(db: Session):
+    return db.query(models.VeterinaryProvider).options(
+        selectinload(models.VeterinaryProvider.veterinarian_links)
+    )
+
+
+def _provider_response(provider: models.VeterinaryProvider) -> ProviderAdminResponse:
+    return ProviderAdminResponse(
+        id=provider.id,
+        external_place_id=provider.external_place_id,
+        name=provider.name,
+        provider_type=provider.provider_type,
+        address=provider.address,
+        phone=provider.phone,
+        latitude=float(provider.latitude) if provider.latitude is not None else None,
+        longitude=float(provider.longitude) if provider.longitude is not None else None,
+        operating_hours=provider.operating_hours,
+        provider_status=provider.provider_status,
+        consultation_enabled=provider.consultation_enabled,
+        veterinarian_ids=sorted(
+            link.veterinarian_id
+            for link in provider.veterinarian_links
+            if link.is_active
+        ),
+        created_at=provider.created_at,
+        updated_at=provider.updated_at,
+    )
+
+
+def _get_provider_or_404(provider_id: int, db: Session) -> models.VeterinaryProvider:
+    provider = _provider_query(db).filter(
+        models.VeterinaryProvider.id == provider_id
+    ).first()
+    if provider is None:
+        raise HTTPException(status_code=404, detail="Veterinary provider not found")
+    return provider
+
+
+def _validate_provider_consultation_state(
+    provider_status: str,
+    consultation_enabled: bool,
+) -> None:
+    if consultation_enabled and provider_status != "partner":
+        raise HTTPException(
+            status_code=409,
+            detail="Only a partner provider can enable Petto consultations",
+        )
+
+
+def _refresh_vet_accepting_state(vet: models.Veterinarian, db: Session) -> None:
+    vet.is_accepting_consultations = (
+        db.query(models.ProviderVeterinarian)
+        .join(models.VeterinaryProvider)
+        .filter(
+            models.ProviderVeterinarian.veterinarian_id == vet.id,
+            models.ProviderVeterinarian.is_active.is_(True),
+            models.ProviderVeterinarian.accepting_consultations.is_(True),
+            models.VeterinaryProvider.provider_status == "partner",
+            models.VeterinaryProvider.consultation_enabled.is_(True),
+        )
+        .first()
+        is not None
+    )
 
 
 def _commit_or_conflict(db: Session, detail: str) -> None:
@@ -211,6 +340,17 @@ def create_veterinarian(payload: VeterinarianCreate, db: Session = Depends(get_d
     ).first()
     if duplicate:
         raise HTTPException(status_code=409, detail="Email is already registered")
+    owner_duplicate = db.query(models.User.id).filter(
+        func.lower(models.User.email) == payload.email
+    ).first()
+    if owner_duplicate:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Email already belongs to a Pet Owner account; use a separate "
+                "email for the veterinarian account"
+            ),
+        )
     vet = models.Veterinarian(
         **payload.model_dump(),
         password_hash=None,
@@ -275,6 +415,89 @@ def update_verification(
     return _vet_response(_get_vet_or_404(vet.id, db))
 
 
+@router.get(
+    "/providers",
+    response_model=list[ProviderAdminResponse],
+    dependencies=[Depends(require_admin_key)],
+)
+def list_admin_providers(
+    provider_status: Literal["listed", "partner", "disabled"] | None = None,
+    search: str | None = Query(default=None, max_length=200),
+    db: Session = Depends(get_db),
+):
+    query = _provider_query(db)
+    if provider_status is not None:
+        query = query.filter(
+            models.VeterinaryProvider.provider_status == provider_status
+        )
+    if search and search.strip():
+        term = f"%{search.strip().lower()}%"
+        query = query.filter(func.lower(models.VeterinaryProvider.name).like(term))
+    providers = query.order_by(models.VeterinaryProvider.name).all()
+    return [_provider_response(provider) for provider in providers]
+
+
+@router.post(
+    "/providers",
+    response_model=ProviderAdminResponse,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_admin_key)],
+)
+def create_provider(payload: ProviderCreate, db: Session = Depends(get_db)):
+    _validate_provider_consultation_state(
+        payload.provider_status,
+        payload.consultation_enabled,
+    )
+    provider = models.VeterinaryProvider(**payload.model_dump())
+    db.add(provider)
+    _commit_or_conflict(db, "External place ID is already registered")
+    logger.info("Veterinary provider created id=%s", provider.id)
+    return _provider_response(_get_provider_or_404(provider.id, db))
+
+
+@router.patch(
+    "/providers/{provider_id}",
+    response_model=ProviderAdminResponse,
+    dependencies=[Depends(require_admin_key)],
+)
+def update_provider(
+    provider_id: int,
+    payload: ProviderUpdate,
+    db: Session = Depends(get_db),
+):
+    provider = _get_provider_or_404(provider_id, db)
+    changes = payload.model_dump(exclude_unset=True)
+    resulting_status = changes.get("provider_status", provider.provider_status)
+    resulting_consultation_enabled = changes.get(
+        "consultation_enabled",
+        provider.consultation_enabled,
+    )
+    _validate_provider_consultation_state(
+        resulting_status,
+        resulting_consultation_enabled,
+    )
+    for name, value in changes.items():
+        setattr(provider, name, value.strip() if isinstance(value, str) else value)
+
+    if not provider.consultation_enabled or provider.provider_status != "partner":
+        affected_vets = []
+        for link in provider.veterinarian_links:
+            link.accepting_consultations = False
+            if link.veterinarian not in affected_vets:
+                affected_vets.append(link.veterinarian)
+        db.flush()
+        for vet in affected_vets:
+            _refresh_vet_accepting_state(vet, db)
+
+    _commit_or_conflict(db, "External place ID is already registered")
+    logger.info(
+        "Veterinary provider updated id=%s fields=%s",
+        provider.id,
+        sorted(changes),
+    )
+    return _provider_response(_get_provider_or_404(provider.id, db))
+
+
 @router.put(
     "/veterinarians/{veterinarian_id}/providers/{provider_id}",
     response_model=VeterinarianAdminResponse,
@@ -290,6 +513,11 @@ def assign_provider(
     provider = db.query(models.VeterinaryProvider).filter_by(id=provider_id).first()
     if provider is None or provider.provider_status == "disabled":
         raise HTTPException(status_code=404, detail="Veterinary provider not found")
+    if payload.accepting_consultations and not provider.consultation_enabled:
+        raise HTTPException(
+            status_code=409,
+            detail="Enable Petto consultations for the provider before assigning a veterinarian",
+        )
     if payload.accepting_consultations and vet.verification_status != "approved":
         raise HTTPException(
             status_code=409,
@@ -310,16 +538,7 @@ def assign_provider(
         payload.is_active and payload.accepting_consultations
     )
     db.flush()
-    vet.is_accepting_consultations = (
-        db.query(models.ProviderVeterinarian)
-        .filter(
-            models.ProviderVeterinarian.veterinarian_id == veterinarian_id,
-            models.ProviderVeterinarian.is_active.is_(True),
-            models.ProviderVeterinarian.accepting_consultations.is_(True),
-        )
-        .first()
-        is not None
-    )
+    _refresh_vet_accepting_state(vet, db)
     db.commit()
     logger.info(
         "Veterinarian assigned id=%s provider_id=%s accepting=%s",

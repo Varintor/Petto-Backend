@@ -104,6 +104,89 @@ def test_admin_creates_searches_and_prevents_duplicate_veterinarians(
     assert db.query(models.Veterinarian).count() == 1
 
 
+def test_admin_rejects_a_veterinarian_email_already_used_by_an_owner(
+    client, db, monkeypatch
+):
+    monkeypatch.setenv("ADMIN_API_KEY", ADMIN_HEADERS["X-Admin-Key"])
+    db.add(
+        models.User(
+            supabase_uid="owner-uid",
+            email="vet@petto.test",
+            name="Existing Owner",
+        )
+    )
+    db.commit()
+
+    response = _create_vet(client)
+
+    assert response.status_code == 409
+    assert "Pet Owner account" in response.json()["detail"]
+    assert db.query(models.Veterinarian).count() == 0
+
+
+def test_admin_creates_updates_and_searches_veterinary_providers(
+    client, monkeypatch
+):
+    monkeypatch.setenv("ADMIN_API_KEY", ADMIN_HEADERS["X-Admin-Key"])
+
+    invalid = client.post(
+        "/api/v1/admin/providers",
+        headers=ADMIN_HEADERS,
+        json={
+            "name": "Information-only Hospital",
+            "provider_status": "listed",
+            "consultation_enabled": True,
+        },
+    )
+    assert invalid.status_code == 409
+
+    created = client.post(
+        "/api/v1/admin/providers",
+        headers=ADMIN_HEADERS,
+        json={
+            "external_place_id": "cmu-small-animal",
+            "name": "CMU Small Animal Hospital",
+            "provider_type": "hospital",
+            "address": "Chiang Mai University",
+            "phone": "053-000-000",
+            "latitude": 18.8046,
+            "longitude": 98.9529,
+            "operating_hours": {"monday": "08:00-20:00"},
+            "provider_status": "partner",
+            "consultation_enabled": True,
+        },
+    )
+    assert created.status_code == 201
+    provider_id = created.json()["id"]
+    assert created.json()["consultation_enabled"] is True
+    assert created.json()["veterinarian_ids"] == []
+
+    result = client.get(
+        "/api/v1/admin/providers?search=small",
+        headers=ADMIN_HEADERS,
+    )
+    assert result.status_code == 200
+    assert [item["id"] for item in result.json()] == [provider_id]
+
+    updated = client.patch(
+        f"/api/v1/admin/providers/{provider_id}",
+        headers=ADMIN_HEADERS,
+        json={"phone": "053-111-111"},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["phone"] == "053-111-111"
+
+    duplicate = client.post(
+        "/api/v1/admin/providers",
+        headers=ADMIN_HEADERS,
+        json={
+            "external_place_id": "cmu-small-animal",
+            "name": "Duplicate Hospital",
+        },
+    )
+    assert duplicate.status_code == 409
+
+
 def test_admin_approves_and_assigns_a_veterinarian_to_a_provider(
     client, db, monkeypatch
 ):
@@ -166,6 +249,49 @@ def test_admin_approves_and_assigns_a_veterinarian_to_a_provider(
     assert disabled.status_code == 200
     assert disabled.json()["is_accepting_consultations"] is False
     link = db.query(models.ProviderVeterinarian).one()
+    assert link.accepting_consultations is False
+
+
+def test_disabling_provider_stops_linked_veterinarian_from_accepting(
+    client, db, monkeypatch
+):
+    monkeypatch.setenv("ADMIN_API_KEY", ADMIN_HEADERS["X-Admin-Key"])
+    provider = client.post(
+        "/api/v1/admin/providers",
+        headers=ADMIN_HEADERS,
+        json={
+            "name": "Petto Partner Hospital",
+            "provider_status": "partner",
+            "consultation_enabled": True,
+        },
+    ).json()
+    veterinarian_id = _create_vet(client).json()["id"]
+    client.post(
+        f"/api/v1/admin/veterinarians/{veterinarian_id}/verification",
+        headers=ADMIN_HEADERS,
+        json={"verification_status": "approved"},
+    )
+    assigned = client.put(
+        f"/api/v1/admin/veterinarians/{veterinarian_id}/providers/{provider['id']}",
+        headers=ADMIN_HEADERS,
+        json={"accepting_consultations": True},
+    )
+    assert assigned.status_code == 200
+    assert assigned.json()["is_accepting_consultations"] is True
+
+    disabled = client.patch(
+        f"/api/v1/admin/providers/{provider['id']}",
+        headers=ADMIN_HEADERS,
+        json={
+            "provider_status": "disabled",
+            "consultation_enabled": False,
+        },
+    )
+
+    assert disabled.status_code == 200
+    vet = db.query(models.Veterinarian).filter_by(id=veterinarian_id).one()
+    link = db.query(models.ProviderVeterinarian).one()
+    assert vet.is_accepting_consultations is False
     assert link.accepting_consultations is False
 
 
