@@ -7,3 +7,4 @@ python-multipart==0.0.32
 alembic==1.18.4
 supabase==2.31.0
 google-genai==2.8.0
+psycopg[binary]==3.2.9
